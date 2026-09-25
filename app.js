@@ -1078,74 +1078,150 @@
         updateRedeemInputState();
     };
 
-    function updateWithdrawValidation() {
-        const amount = Number(byId('withdrawAmount')?.value || 0);
-        const methodId = byId('withdrawMethod')?.value || '';
-        const pin = byId('withdrawPin')?.value || '';
-        const button = byId('withdrawSubmitBtn') || document.querySelector('#page-withdraw .btn-primary');
-        if (button) button.id = 'withdrawSubmitBtn';
-        const lifetimeRedeemedCards = getLifetimeRedeemedCards();
-        const eligible = lifetimeRedeemedCards >= MIN_REDEEMED_CARDS_FOR_WITHDRAWAL;
-        const valid = Number.isFinite(amount) && amount >= MIN_WITHDRAWAL && amount <= state.user.redeemedBalance && methodId && /^\d{4}$/.test(pin);
-        if (button) button.disabled = !valid;
-        updateWithdrawSummary();
-        updateWithdrawInlineFeedback({ amount, methodId, pin, valid, eligible, lifetimeRedeemedCards });
-        return valid;
-    }
+    // ------------------------------------------------------------------
+    // Step-by-step withdrawal wizard. Instead of one long form, the amount,
+    // payout method and PIN are each collected in their own popup (reusing
+    // the flow sheet), one requirement at a time, before a final confirm step.
+    // ------------------------------------------------------------------
+    let withdrawWizard = { amount: 0, methodId: '', pin: '' };
 
-    function updateWithdrawInlineFeedback({ amount, methodId, pin, valid, eligible, lifetimeRedeemedCards }) {
-        const result = byId('withdrawResult');
-        if (!result || result.dataset.locked === 'success') return;
-        const touched = Boolean(amount || methodId || pin);
-        let message = '';
-        if (touched && (!Number.isFinite(amount) || amount <= 0)) message = 'Enter an amount to withdraw.';
-        else if (amount && amount < MIN_WITHDRAWAL) message = `Minimum withdrawal is GHS ${money(MIN_WITHDRAWAL)}.`;
-        else if (amount > state.user.redeemedBalance) message = 'Withdrawal amount exceeds redeemed balance.';
-        else if (amount && !methodId) message = 'Choose a saved withdrawal method.';
-        else if ((amount || methodId) && pin && !/^\d{4}$/.test(pin)) message = 'PIN must be exactly 4 digits.';
-        else if (valid) message = '';
-        result.style.display = message ? 'block' : 'none';
-        result.innerHTML = message ? `<div class="inline-alert error">${escape(message)}</div>` : '';
-    }
-
-    window.updateWithdrawSummary = function () {
-        const amount = Number(byId('withdrawAmount')?.value || 0);
-        const methodId = byId('withdrawMethod')?.value || '';
-        const summary = byId('withdrawSummary');
-        if (!summary) return;
-        if (amount > 0 && methodId) {
-            summary.style.display = 'block';
-            const method = (state.methods || []).find(m => m.id === methodId);
-            const breakdown = withdrawalBreakdown(amount);
-            const sumAmount = byId('sumAmount');
-            const sumMethod = byId('sumMethod');
-            const sumTotal = byId('sumTotal');
-            const rows = summary.querySelectorAll('.row');
-            if (rows[2]) rows[2].innerHTML = `<span class="label">Operational charge (10%)</span><span class="value">GHS ${money(breakdown.operationalCharge)}</span>`;
-            if (sumAmount) sumAmount.textContent = money(breakdown.requestedAmount);
-            if (sumMethod) sumMethod.textContent = method ? `${method.network} - ${method.phone}` : '-';
-            if (sumTotal) sumTotal.textContent = money(breakdown.actualAmount);
-        } else {
-            summary.style.display = 'none';
+    window.startWithdrawWizard = function () {
+        if (!state.isLoggedIn) {
+            showToast('warning', 'Please log in to request a withdrawal.');
+            return safeNavigate('login', 'withdraw-auth');
         }
-    };
-
-    window.handleWithdraw = function () {
-        const amount = Number(byId('withdrawAmount')?.value || 0);
-        const methodId = byId('withdrawMethod')?.value || '';
-        const pin = byId('withdrawPin')?.value || '';
-        const method = state.methods.find(m => m.id === methodId);
-        const result = byId('withdrawResult');
-        if (!Number.isFinite(amount) || amount < MIN_WITHDRAWAL) return error(result, `Minimum withdrawal is GHS ${money(MIN_WITHDRAWAL)}.`);
-        if (amount > state.user.redeemedBalance) return error(result, 'Withdrawal amount exceeds redeemed balance.');
-        if (!method) return error(result, 'Choose a saved withdrawal method.');
-        if (!/^\d{4}$/.test(pin)) return error(result, 'Enter your 4-digit withdrawal PIN.');
         const lifetimeRedeemedCards = getLifetimeRedeemedCards();
         if (lifetimeRedeemedCards < MIN_REDEEMED_CARDS_FOR_WITHDRAWAL) {
             const remaining = MIN_REDEEMED_CARDS_FOR_WITHDRAWAL - lifetimeRedeemedCards;
             return openFlowSheet({ title: 'Withdrawal not available yet', body: `<p class="text-secondary">You need to redeem at least 3 cards before requesting a withdrawal. Please redeem ${remaining} more card${remaining === 1 ? '' : 's'} and try again.</p>`, primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center' });
         }
-        const breakdown = withdrawalBreakdown(amount);
+        if (!(state.methods || []).length) {
+            showToast('warning', 'Add a withdrawal method first.');
+            return showAddMethod();
+        }
+        withdrawWizard = { amount: 0, methodId: '', pin: '' };
+        showWithdrawAmountStep();
+    };
+
+    function showWithdrawAmountStep() {
+        openFlowSheet({
+            title: 'How much do you want to withdraw?',
+            body: `
+                <div class="flow-summary">
+                    <p class="text-secondary text-sm" style="margin:0 0 4px;">Step 1 of 3 · Amount</p>
+                    <div class="input-group">
+                        <label for="wizAmount">Amount</label>
+                        <div class="input-wrap"><span class="prefix">₵</span><input type="number" id="wizAmount" placeholder="0.00" min="${MIN_WITHDRAWAL}" step="0.01" value="${withdrawWizard.amount || ''}" oninput="validateWizardAmount()" /></div>
+                        <div class="help-text">Available: GHS ${money(state.user.redeemedBalance)} · Minimum GHS ${money(MIN_WITHDRAWAL)}.</div>
+                    </div>
+                    <div id="wizAmountResult"></div>
+                </div>
+            `,
+            primaryText: 'Continue',
+            primaryDisabled: true,
+            secondaryText: 'Cancel',
+            onPrimary: () => {
+                withdrawWizard.amount = Number(byId('wizAmount')?.value || 0);
+                showWithdrawMethodStep();
+            },
+        });
+        window.setTimeout(() => byId('wizAmount')?.focus(), 60);
+        validateWizardAmount();
+    }
+
+    window.validateWizardAmount = function () {
+        const amount = Number(byId('wizAmount')?.value || 0);
+        const result = byId('wizAmountResult');
+        const primary = byId('flowPrimaryBtn');
+        let message = '';
+        if (amount > 0 && amount < MIN_WITHDRAWAL) message = `Minimum withdrawal is GHS ${money(MIN_WITHDRAWAL)}.`;
+        else if (amount > state.user.redeemedBalance) message = 'Withdrawal amount exceeds redeemed balance.';
+        if (result) { result.innerHTML = message ? `<div class="inline-alert error">${escape(message)}</div>` : ''; }
+        const valid = Number.isFinite(amount) && amount >= MIN_WITHDRAWAL && amount <= state.user.redeemedBalance;
+        if (primary) primary.disabled = !valid;
+        return valid;
+    };
+
+    function showWithdrawMethodStep() {
+        const methods = state.methods || [];
+        if (!withdrawWizard.methodId) withdrawWizard.methodId = (methods.find(m => m.isDefault) || methods[0] || {}).id || '';
+        const options = methods.map(m => `<option value="${escape(m.id)}" ${m.id === withdrawWizard.methodId ? 'selected' : ''}>${escape(m.network)} - ${escape(m.phone)}</option>`).join('');
+        openFlowSheet({
+            title: 'Where should we send it?',
+            body: `
+                <div class="flow-summary">
+                    <p class="text-secondary text-sm" style="margin:0 0 4px;">Step 2 of 3 · Payout method</p>
+                    <div class="input-group">
+                        <label for="wizMethod">Select method</label>
+                        <div class="input-wrap"><select id="wizMethod" onchange="validateWizardMethod()"><option value="">Select a method</option>${options}</select></div>
+                    </div>
+                    <button class="btn btn-secondary btn-sm" type="button" style="width:auto;padding:6px 14px;" onclick="closeFlowSheet(); showAddMethod();">+ Add account details</button>
+                </div>
+            `,
+            primaryText: 'Continue',
+            primaryDisabled: !withdrawWizard.methodId,
+            secondaryText: 'Back',
+            onPrimary: () => {
+                withdrawWizard.methodId = byId('wizMethod')?.value || '';
+                showWithdrawPinStep();
+            },
+        });
+        const secondary = byId('flowSecondaryBtn');
+        if (secondary) secondary.onclick = showWithdrawAmountStep;
+    }
+
+    window.validateWizardMethod = function () {
+        const primary = byId('flowPrimaryBtn');
+        if (primary) primary.disabled = !(byId('wizMethod')?.value || '');
+    };
+
+    function showWithdrawPinStep() {
+        openFlowSheet({
+            title: 'Confirm your withdrawal PIN',
+            body: `
+                <div class="flow-summary">
+                    <p class="text-secondary text-sm" style="margin:0 0 4px;">Step 3 of 3 · Withdrawal PIN</p>
+                    <div class="input-group">
+                        <label for="wizPin">Withdrawal PIN</label>
+                        <div class="input-wrap">
+                            <input type="password" id="wizPin" placeholder="••••" maxlength="4" inputmode="numeric" pattern="[0-9]*" value="${escape(withdrawWizard.pin || '')}" oninput="validateWizardPin()" />
+                            <span class="toggle-vis" onclick="togglePinVisibility(document.getElementById('wizPin'),this)">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                            </span>
+                        </div>
+                        <div class="help-text">Your 4-digit withdrawal PIN.</div>
+                    </div>
+                    <div id="wizPinResult"></div>
+                </div>
+            `,
+            primaryText: 'Review withdrawal',
+            primaryDisabled: !/^\d{4}$/.test(withdrawWizard.pin || ''),
+            secondaryText: 'Back',
+            onPrimary: () => {
+                withdrawWizard.pin = byId('wizPin')?.value || '';
+                if (!/^\d{4}$/.test(withdrawWizard.pin)) { validateWizardPin(); return; }
+                showWithdrawConfirmStep();
+            },
+        });
+        const secondary = byId('flowSecondaryBtn');
+        if (secondary) secondary.onclick = showWithdrawMethodStep;
+        window.setTimeout(() => byId('wizPin')?.focus(), 60);
+    }
+
+    window.validateWizardPin = function () {
+        const pin = byId('wizPin')?.value || '';
+        const primary = byId('flowPrimaryBtn');
+        const result = byId('wizPinResult');
+        const valid = /^\d{4}$/.test(pin);
+        if (primary) primary.disabled = !valid;
+        if (result) result.innerHTML = pin && !valid ? `<div class="inline-alert error">PIN must be exactly 4 digits.</div>` : '';
+        return valid;
+    };
+
+    function showWithdrawConfirmStep() {
+        const method = (state.methods || []).find(m => m.id === withdrawWizard.methodId);
+        if (!method) { showToast('error', 'Choose a saved withdrawal method.'); return showWithdrawMethodStep(); }
+        const breakdown = withdrawalBreakdown(withdrawWizard.amount);
         openFlowSheet({
             title: 'Confirm withdrawal',
             body: `
@@ -1155,13 +1231,16 @@
                     <div class="summary-row"><span>Operational charge (10%)</span><strong>${ghs(breakdown.operationalCharge)}</strong></div>
                     <div class="summary-row"><span>Actual payout to admin</span><strong>${ghs(breakdown.actualAmount)}</strong></div>
                     <div class="summary-row"><span>Method</span><strong>${escape(method.network)} · ${escape(method.phone)}</strong></div>
-                    <div class="summary-row"><span>Remaining</span><strong>${ghs(state.user.redeemedBalance - amount)}</strong></div>
+                    <div class="summary-row"><span>Remaining</span><strong>${ghs(state.user.redeemedBalance - withdrawWizard.amount)}</strong></div>
                 </div>
             `,
             primaryText: 'Submit withdrawal',
-            onPrimary: () => completeWithdrawal({ amount, methodId, pin }),
+            secondaryText: 'Back',
+            onPrimary: () => completeWithdrawal({ amount: withdrawWizard.amount, methodId: withdrawWizard.methodId, pin: withdrawWizard.pin }),
         });
-    };
+        const secondary = byId('flowSecondaryBtn');
+        if (secondary) secondary.onclick = showWithdrawPinStep;
+    }
 
     async function completeWithdrawal(payload) {
         const button = byId('flowPrimaryBtn');
@@ -1183,9 +1262,7 @@
                 result.style.display = 'block';
                 result.innerHTML = `<div class="inline-alert success">Withdrawal request submitted for admin approval. Reference ${escape(data.withdrawal.reference)}.</div>${formatReceipt(data.receipt)}`;
             }
-            ['withdrawAmount', 'withdrawPin'].forEach(id => { const el = byId(id); if (el) el.value = ''; });
-            byId('withdrawSummary') && (byId('withdrawSummary').style.display = 'none');
-            updateWithdrawValidation();
+            withdrawWizard = { amount: 0, methodId: '', pin: '' };
             if (pendingKyc) showKycOptions(data.withdrawal.reference);
             else showToast('success', 'Withdrawal request submitted for admin approval.');
         } catch (e) {
@@ -2279,17 +2356,6 @@
 
     document.addEventListener('input', event => {
         if (event.target?.id === 'withdrawResult') event.target.dataset.locked = '';
-        if (['withdrawAmount', 'withdrawMethod', 'withdrawPin'].includes(event.target?.id)) {
-            byId('withdrawResult')?.removeAttribute('data-locked');
-            updateWithdrawValidation();
-        }
-    });
-
-    document.addEventListener('change', event => {
-        if (event.target?.id === 'withdrawMethod') {
-            byId('withdrawResult')?.removeAttribute('data-locked');
-            updateWithdrawValidation();
-        }
     });
 
     document.addEventListener('keydown', event => {
@@ -2379,11 +2445,6 @@
         document.querySelectorAll('.brand-name').forEach(el => { el.innerHTML = 'PHANTOM <span class="brand-name-accent">CARDS</span>'; });
         const redeemButton = document.querySelector('#page-redeem .redeem-entry-card > .redeem-submit');
         if (redeemButton) redeemButton.disabled = true;
-        const withdrawButton = document.querySelector('#page-withdraw .btn-primary');
-        if (withdrawButton) {
-            withdrawButton.id = 'withdrawSubmitBtn';
-            withdrawButton.disabled = true;
-        }
         bindRealAuthForms();
         try {
             await refresh();

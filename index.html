@@ -6952,41 +6952,8 @@
             <div class="identity-card withdraw-balance"><span class="surface-icon"><i data-lucide="layers"></i></span><div><div class="balance-feature-label">Redeemed Balance</div><div class="balance-feature-value" style="margin:5px 0 0">GHS <span id="withdrawBalance">••••••</span></div><div class="balance-copy">Available for withdrawal</div></div></div>
             <div class="section-kicker">Withdrawal Details</div>
             <div class="withdraw-form">
-                <div class="input-group">
-                    <label>Amount</label>
-                    <div class="input-wrap"><span class="prefix">₵</span><input type="number" id="withdrawAmount" placeholder="0.00" min="10" step="0.01" /></div>
-                </div>
-
-                <div class="input-group mt-3">
-                    <label>Select Method</label>
-                    <div class="input-wrap">
-                        <select id="withdrawMethod">
-                            <option value="">Select a method</option>
-                        </select>
-                    </div>
-                </div>
-
-                <button class="btn btn-secondary btn-sm" style="width:auto;padding:6px 14px;margin-top:8px;" onclick="showAddMethod()">+ Add account details</button>
-
-                <div class="input-group mt-3">
-                    <label>Withdrawal PIN</label>
-                    <div class="input-wrap">
-                        <input type="password" id="withdrawPin" placeholder="••••" maxlength="4" inputmode="numeric" pattern="[0-9]*" />
-                        <span class="toggle-vis" onclick="togglePinVisibility(document.getElementById('withdrawPin'),this)">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                        </span>
-                    </div>
-                    <div class="help-text">Your 4-digit withdrawal PIN.</div>
-                </div>
-
-                <div id="withdrawSummary" class="withdraw-summary mt-3" style="display:none;">
-                    <div class="row"><span class="label">Amount</span><span class="value">₵<span id="sumAmount">0.00</span></span></div>
-                    <div class="row"><span class="label">Method</span><span class="value" id="sumMethod">—</span></div>
-                    <div class="row"><span class="label">Operational charge (10%)</span><span class="value">GHS 0.00</span></div>
-                    <div class="row total"><span class="label">Actual payout</span><span class="value">GHS <span id="sumTotal">0.00</span></span></div>
-                </div>
-
-                <button class="btn btn-primary mt-3" id="withdrawSubmitBtn" onclick="handleWithdraw()" disabled>Request Withdrawal</button>
+                <p class="text-secondary text-sm" style="margin:0 0 14px;">Tap below and we'll ask for the amount, payout method and PIN one step at a time.</p>
+                <button class="btn btn-primary" id="withdrawSubmitBtn" onclick="startWithdrawWizard()">Request Withdrawal</button>
                 <div id="withdrawResult" class="mt-3" style="display:none;"></div>
             </div>
             <div class="account-panel">
@@ -9253,6 +9220,10 @@
         }
 
         function handleWithdraw() {
+            showToast('info', 'Secure withdrawal flow is loading. Please try again.');
+        }
+
+        function startWithdrawWizard() {
             showToast('info', 'Secure withdrawal flow is loading. Please try again.');
         }
 
