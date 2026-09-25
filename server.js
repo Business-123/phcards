@@ -1098,7 +1098,7 @@ function cardPaymentCallbackUrl(req, transactionId, browserOrigin = '') {
   return `${origin}/?card_payment=1&transactionId=${encodeURIComponent(transactionId)}`;
 }
 function requireUser(req, res, db) { const user = userFor(req, db); if (!user) { fail(res, 401, 'Please sign in.'); return null; } return user; }
-function staticFile(res, file) { const safe = path.normalize(file).replace(/^\.\.([/\\]|$)/, ''); const target = path.join(ROOT, safe === '/' ? 'index.html' : safe); if (!target.startsWith(ROOT) || !fs.existsSync(target)) return false; const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.css': 'text/css' }; res.writeHead(200, { 'content-type': types[path.extname(target)] || 'application/octet-stream', 'cache-control': 'no-store, max-age=0' }); fs.createReadStream(target).pipe(res); return true; }
+function staticFile(res, file) { const safe = path.normalize(file).replace(/^\.\.([/\\]|$)/, ''); const target = path.join(ROOT, safe === '/' ? 'index.html' : safe); if (!target.startsWith(ROOT) || !fs.existsSync(target)) return false; const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.css': 'text/css', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml' }; res.writeHead(200, { 'content-type': types[path.extname(target)] || 'application/octet-stream', 'cache-control': 'no-store, max-age=0' }); fs.createReadStream(target).pipe(res); return true; }
 function appBaseUrlPortMismatch() {
   try {
     const parsed = new URL(APP_BASE_URL);
