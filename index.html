@@ -12,14 +12,20 @@
     <link rel="manifest" href="/site.webmanifest" />
     <meta name="theme-color" content="#1E1B18" />
 
-    <!-- Social / link preview (Twitter, iMessage, Slack, Discord, WhatsApp, etc.) -->
+    <!-- Social / link preview (Snapchat, Twitter, iMessage, Slack, Discord, WhatsApp, etc.) -->
+    <!-- These MUST be absolute URLs (https://...) — Snapchat and most chat apps -->
+    <!-- silently ignore relative paths like "/og-image.png" and just show no image. -->
+    <!-- __ORIGIN__ is replaced with the site's real https URL when the page is served. -->
     <meta property="og:title" content="Phantom Cards" />
     <meta property="og:description" content="Phantom Cards" />
-    <meta property="og:image" content="/og-image.png" />
+    <meta property="og:image" content="__ORIGIN__/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:url" content="__ORIGIN__/" />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Phantom Cards" />
-    <meta name="twitter:image" content="/og-image.png" />
+    <meta name="twitter:image" content="__ORIGIN__/og-image.png" />
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
