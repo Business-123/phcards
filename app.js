@@ -109,7 +109,7 @@
             ...purchase,
             amountPaid: purchase.amountPaid ?? purchase.amount,
         }));
-        state.purchaseLimits = data.purchaseLimits || { date: '', maxPerPrice: 2, counts: {}, resetAt: null };
+        state.purchaseLimits = data.purchaseLimits || { date: '', max: 3, count: 0, resetAt: null };
         state.withdrawals = data.withdrawals || [];
         updateRedeemBalance();
         window.renderDashboard?.();
@@ -525,13 +525,13 @@
         if (!card) return;
         const stockAvailable = card.active !== false && Number(card.stock || 0) > 0;
         const limitReached = dailyPurchaseLimitReached(card);
-        const maxPerPrice = Number(state.purchaseLimits?.maxPerPrice || 2);
+        const maxPerDay = Number(state.purchaseLimits?.max || 3);
         const copy = limitReached
-            ? `Our marketplace rules allow each price tier to be purchased up to ${maxPerPrice} times per day. You have reached today's limit for this tier. The limit resets at the next daily reset, after which you may purchase cards from this tier again if stock is available.`
+            ? `Our marketplace rules allow up to ${maxPerDay} card purchases per day, across all price tiers combined. You have reached today's limit. The limit resets at the next daily reset, after which you may purchase cards again if stock is available.`
             : 'This card is temporarily unavailable because the current inventory has been fully allocated or the card has been paused. We limit availability to protect card quality and fair access. Please check back later for a restock.';
         openFlowSheet({
             title: limitReached ? 'Purchase limit reached' : (!stockAvailable ? 'Currently out of stock' : 'Card availability'),
-            body: `<div class="availability-info"><div class="availability-info-icon"><i data-lucide="info"></i></div><p>${escape(copy)}</p><div class="availability-rule"><strong>Availability rule</strong><span>Purchases are limited to ${maxPerPrice} cards per price tier, per day. Inventory limits may also apply.</span></div></div>`,
+            body: `<div class="availability-info"><div class="availability-info-icon"><i data-lucide="info"></i></div><p>${escape(copy)}</p><div class="availability-rule"><strong>Availability rule</strong><span>Purchases are limited to ${maxPerDay} cards per day in total. Inventory limits may also apply.</span></div></div>`,
             primaryText: 'Understood', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center',
         });
     };
@@ -1913,13 +1913,16 @@
         return tier ? tier.key : price.toFixed(2);
     }
 
-    function dailyPurchaseCount(card) {
+    // Card argument is accepted (and ignored) so existing call sites that pass a
+    // specific card keep working — the daily cap is now a flat total across all
+    // tiers combined, not tracked per card or per tier.
+    function dailyPurchaseCount(_card) {
         const limits = state.purchaseLimits || {};
-        return limits.date === ghanaDateNow() ? Number(limits.counts?.[purchasePriceKey(card)] || 0) : 0;
+        return limits.date === ghanaDateNow() ? Number(limits.count || 0) : 0;
     }
 
-    function dailyPurchaseLimitReached(card) {
-        return dailyPurchaseCount(card) >= Number(state.purchaseLimits?.maxPerPrice || 2);
+    function dailyPurchaseLimitReached(_card) {
+        return dailyPurchaseCount() >= Number(state.purchaseLimits?.max || 3);
     }
 
     function nextGhanaMidnight() {
@@ -1942,7 +1945,7 @@
         if (state.purchaseLimits?.date && state.purchaseLimits.date !== today) {
             const [year, month, day] = today.split('-').map(Number);
             const nextReset = new Date(Date.UTC(year, month - 1, day + 1)).toISOString();
-            state.purchaseLimits = { ...(state.purchaseLimits || {}), date: today, counts: {}, resetAt: nextReset };
+            state.purchaseLimits = { ...(state.purchaseLimits || {}), date: today, count: 0, resetAt: nextReset };
             window.renderShopCards?.();
             window.renderPriceRails?.();
             refresh().catch(() => {});
@@ -1951,7 +1954,7 @@
         const resetAt = nextGhanaMidnight();
         const remaining = resetAt - Date.now();
         if (remaining <= 0) {
-            state.purchaseLimits = { ...(state.purchaseLimits || {}), date: ghanaDateNow(), counts: {}, resetAt: new Date(resetAt + 86400000).toISOString() };
+            state.purchaseLimits = { ...(state.purchaseLimits || {}), date: ghanaDateNow(), count: 0, resetAt: new Date(resetAt + 86400000).toISOString() };
             window.renderShopCards?.();
             window.renderPriceRails?.();
             refresh().catch(() => {});
@@ -2100,9 +2103,9 @@
             const query = state.search.toLowerCase().trim();
             filtered = filtered.filter(card => [card.title, card.category, card.series].some(value => String(value || '').toLowerCase().includes(query)));
         }
-        // Once a tier's daily purchase cap (2 cards) is reached, every card
-        // in that tier goes out of stock and disappears from the shop for
-        // the rest of the day, rather than just showing as disabled.
+        // Once the flat daily purchase cap (3 cards, across all tiers) is reached,
+        // every card goes out of stock and disappears from the shop for the rest
+        // of the day, rather than just showing as disabled.
         const beforeLimitFilter = filtered.length;
         filtered = filtered.filter(card => !dailyPurchaseLimitReached(card));
         const hiddenByLimit = beforeLimitFilter > 0 && filtered.length === 0;
@@ -2112,11 +2115,10 @@
         else if (sortVal === 'name') filtered.sort((a, b) => String(a.title).localeCompare(String(b.title)));
         if (!filtered.length) {
             grid.innerHTML = '';
-            if (hiddenByLimit && selectedRange) {
-                const label = selectedRange.min === selectedRange.max ? `$${selectedRange.min}` : `$${selectedRange.min}–$${selectedRange.max}`;
-                const max = state.purchaseLimits?.maxPerPrice || 2;
-                empty.querySelector('h3').textContent = "You've reached today's limit for this tier";
-                empty.querySelector('p').innerHTML = `You've bought ${max} ${label} cards today. This tier restocks in <strong data-daily-countdown-card>${countdownText(Math.max(0, nextGhanaMidnight() - Date.now()))}</strong>.`;
+            if (hiddenByLimit) {
+                const max = state.purchaseLimits?.max || 3;
+                empty.querySelector('h3').textContent = "You've reached today's purchase limit";
+                empty.querySelector('p').innerHTML = `You've bought ${max} cards today. New purchases open in <strong data-daily-countdown-card>${countdownText(Math.max(0, nextGhanaMidnight() - Date.now()))}</strong>.`;
                 startDailyPurchaseCountdown();
             } else {
                 empty.querySelector('h3').textContent = 'No cards found';

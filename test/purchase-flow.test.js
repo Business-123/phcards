@@ -135,40 +135,37 @@ test('the old deposit endpoints are gone', { timeout: 15000 }, async t => {
   assert.equal(config.data.minDeposit, undefined);
 });
 
-test('each exact USD price allows two Ghana-calendar-day purchases and resets at midnight', { timeout: 30000 }, async t => {
+test('a flat 3 cards per Ghana-calendar-day limit applies across all price tiers and resets at midnight', { timeout: 30000 }, async t => {
   const site = await createSite(t);
   const owner = await site.signup('Daily Buyer', '0241234577', 'daily.buyer@gmail.com');
   assert.equal(owner.status, 201);
   const initial = await site.request('/api/state', {}, owner.cookie);
-  const cardA = initial.data.cards.find(item => item.active && item.stock > 4);
-  const cardB = initial.data.cards.find(item => item.active && item.stock > 4 && item.id !== cardA.id && item.displayPriceUsd === cardA.displayPriceUsd);
-  const cardC = initial.data.cards.find(item => item.active && item.stock > 4 && item.displayPriceUsd !== cardA.displayPriceUsd);
-  assert.ok(cardA && cardB && cardC, 'same-price and different-price cards with enough stock are available');
+  const candidates = initial.data.cards.filter(item => item.active && item.stock > 4);
+  const [cardA, cardB, cardC, cardD] = candidates;
+  assert.ok(cardA && cardB && cardC && cardD, 'at least four distinct cards with enough stock are available');
+  assert.equal(initial.data.purchaseLimits.max, 3, 'the daily cap is 3 cards total');
   assert.match(initial.data.purchaseLimits.resetAt, /T00:00:00\.000Z$/, 'reset is at Ghana midnight/UTC midnight');
 
+  // Three purchases from different price tiers all count toward the same flat quota.
   await site.buyCard(owner.cookie, cardA.id, 'daily_card_a_key_01');
-  await site.buyCard(owner.cookie, cardB.id, 'daily_card_b_key_01'); // a different card at the same price shares the quota
-  const thirdA = await site.startPurchase(owner.cookie, cardA.id, 'daily_card_a_key_03');
-  assert.equal(thirdA.status, 409, 'third purchase at the same price is rejected server-side');
-  assert.match(thirdA.data.error, /limit.*reached/i);
+  await site.buyCard(owner.cookie, cardB.id, 'daily_card_b_key_01');
+  await site.buyCard(owner.cookie, cardC.id, 'daily_card_c_key_01');
+  const stateAfterThree = await site.request('/api/state', {}, owner.cookie);
+  assert.equal(stateAfterThree.data.purchaseLimits.count, 3, 'the flat counter reflects all three purchases regardless of tier');
 
-  const rapidC = await Promise.all([
-    site.startPurchase(owner.cookie, cardC.id, 'daily_card_c_key_01'),
-    site.startPurchase(owner.cookie, cardC.id, 'daily_card_c_key_02'),
-    site.startPurchase(owner.cookie, cardC.id, 'daily_card_c_key_03'),
-  ]);
-  assert.deepEqual(rapidC.map(result => result.status).sort(), [201, 201, 409], 'unfinished payments count toward the price limit');
+  const fourth = await site.startPurchase(owner.cookie, cardD.id, 'daily_card_d_key_01');
+  assert.equal(fourth.status, 409, 'a fourth purchase in the same day is rejected server-side, even from a different tier');
+  assert.match(fourth.data.error, /limit.*reached/i);
 
   let db = site.readDb();
-  assert.equal(db.purchases.filter(item => item.cardId === cardA.id).length, 1);
-  assert.equal(db.purchases.filter(item => item.cardId === cardB.id).length, 1);
+  assert.equal(db.purchases.filter(item => item.userId === owner.data.user.id).length, 3);
 
-  // Move Card A/B purchases to an earlier calendar day: the limit is date-based, not a rolling 24 hours.
+  // Move today's purchases to an earlier calendar day: the limit is date-based, not a rolling 24 hours.
   const earlier = new Date(Date.now() - 2 * 86400000).toISOString();
-  db.purchases.filter(item => [cardA.id, cardB.id].includes(item.cardId)).forEach(item => { item.createdAt = earlier; });
+  db.purchases.filter(item => item.userId === owner.data.user.id).forEach(item => { item.createdAt = earlier; });
   site.writeDb(db);
   const resetState = await site.request('/api/state', {}, owner.cookie);
-  assert.equal(resetState.data.purchaseLimits.counts[cardA.displayPriceUsd.toFixed(2)], undefined, 'the shared price quota resets on the new calendar day');
-  const afterReset = await site.startPurchase(owner.cookie, cardB.id, 'daily_card_b_reset_02');
-  assert.equal(afterReset.status, 201, 'a same-price card can be purchased again after the calendar reset');
+  assert.equal(resetState.data.purchaseLimits.count, 0, 'the flat daily quota resets on the new calendar day');
+  const afterReset = await site.startPurchase(owner.cookie, cardD.id, 'daily_card_d_reset_02');
+  assert.equal(afterReset.status, 201, 'purchases are allowed again after the calendar reset');
 });

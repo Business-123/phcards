@@ -77,9 +77,8 @@ const PRICE_OVERRIDES_GHS = { 4: 45 };
 const GHS_OVERRIDE_TO_USD = Object.fromEntries(Object.entries(PRICE_OVERRIDES_GHS).map(([usd, ghs]) => [ghs, Number(usd)]));
 function ghsForUsd(usd) { return PRICE_OVERRIDES_GHS[usd] !== undefined ? PRICE_OVERRIDES_GHS[usd] : money(usd * GHS_PER_USD); }
 function usdForGhs(priceGhs) { return GHS_OVERRIDE_TO_USD[priceGhs] !== undefined ? GHS_OVERRIDE_TO_USD[priceGhs] : money(priceGhs / GHS_PER_USD); }
-// Purchase-limit tiers: the daily 2-card cap applies per *tier*, not per
-// exact price — buying two cards from anywhere in a tier (e.g. one $4 card
-// and one $5 card) exhausts that whole tier for the day.
+// Price tiers are still used for labeling/reporting, but the daily purchase
+// cap (see DAILY_CARD_PURCHASE_LIMIT) is now a flat total across all tiers.
 const PRICE_TIERS = [
   { key: 'starter', min: 4, max: 5 },
   { key: 'core', min: 6, max: 10 },
@@ -186,7 +185,9 @@ function normalizeCode(value) { return String(value || '').toUpperCase().replace
 function money(value) { return Math.round(Number(value) * 100) / 100; }
 function now() { return new Date().toISOString(); }
 const GHANA_TIME_ZONE = 'Africa/Accra';
-const DAILY_CARD_PURCHASE_LIMIT = 2;
+// Flat daily cap: a user may buy at most this many cards total per Ghana calendar
+// day, across every price tier combined (no longer tracked per tier).
+const DAILY_CARD_PURCHASE_LIMIT = 3;
 function ghanaCalendarDate(value = Date.now()) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: GHANA_TIME_ZONE,
@@ -411,22 +412,23 @@ function normalizeDb(db) {
     user.redeemedBalance = money(user.redeemedBalance || 0);
     user.kycStatus = Object.values(KYC_STATUS).includes(user.kycStatus) ? user.kycStatus : KYC_STATUS.NOT_VERIFIED;
     user.kycVerifiedAt = user.kycStatus === KYC_STATUS.VERIFIED ? (user.kycVerifiedAt || now()) : null;
+    user.blocked = Boolean(user.blocked);
+    user.blockedAt = user.blocked ? (user.blockedAt || now()) : null;
+    user.blockedReason = user.blocked ? String(user.blockedReason || '').trim().slice(0, 500) : null;
   });
   return clean;
 }
 function rebuildDailyPurchaseCounts(db) {
   const counts = new Map();
   for (const purchase of db.purchases) {
-    const card = db.cards.find(item => item.id === purchase.cardId);
-    if (!purchase.userId || !card) continue;
+    if (!purchase.userId) continue;
     const date = ghanaCalendarDate(purchase.createdAt || Date.now());
-    const priceKey = purchasePriceKey(card);
-    const key = `${purchase.userId}:${priceKey}:${date}`;
+    const key = `${purchase.userId}:${date}`;
     counts.set(key, (counts.get(key) || 0) + 1);
   }
   db.dailyPurchaseCounts = [...counts.entries()].map(([key, count]) => {
-    const [userId, priceKey, purchaseDate] = key.split(':');
-    return { id: `daily_${userId}_${priceKey}_${purchaseDate}`, userId, priceKey, purchaseDate, count };
+    const [userId, purchaseDate] = key.split(':');
+    return { id: `daily_${userId}_${purchaseDate}`, userId, purchaseDate, count };
   });
 }
 function load() {
@@ -576,14 +578,13 @@ function publicState(db, user) {
   const purchases = db.purchases.filter(x => x.userId === userId).map(publicPurchase).sort((a,b) => b.createdAt.localeCompare(a.createdAt));
   const withdrawals = db.withdrawals.filter(x => x.userId === userId).map(publicWithdrawal).sort((a,b) => b.createdAt.localeCompare(a.createdAt));
   const purchaseDate = ghanaCalendarDate();
-  const dailyPurchaseCounts = {};
-  db.dailyPurchaseCounts
-    .filter(item => item.userId === userId && item.purchaseDate === purchaseDate && item.count > 0)
-    .forEach(item => { dailyPurchaseCounts[item.priceKey] = Math.min(Number(item.count) || 0, DAILY_CARD_PURCHASE_LIMIT); });
+  const dailyRecord = db.dailyPurchaseCounts.find(item => item.userId === userId && item.purchaseDate === purchaseDate);
+  const dailyPurchaseCount = Math.min(Number(dailyRecord?.count) || 0, DAILY_CARD_PURCHASE_LIMIT);
   return {
     user: { id: user.id, name: user.name, email: user.email || '', phone: user.phone, contactEmailCapturedAt: user.contactEmailCapturedAt || null, createdAt: user.createdAt, walletBalance: user.walletBalance, redeemedBalance: user.redeemedBalance, hasPin: Boolean(user.pinHash), kycStatus: user.kycStatus || KYC_STATUS.NOT_VERIFIED, kycVerifiedAt: user.kycVerifiedAt || null, lifetimeRedeemedCards: redeemedCardsCount(db, user.id) },
     cards, codes, methods: db.methods.filter(x => x.userId === userId), transactions: txs, receipts, purchases, withdrawals,
-    purchaseLimits: { date: purchaseDate, maxPerPrice: DAILY_CARD_PURCHASE_LIMIT, counts: dailyPurchaseCounts, resetAt: nextGhanaMidnightIso() },
+    // Flat daily total across all tiers, not per price tier.
+    purchaseLimits: { date: purchaseDate, max: DAILY_CARD_PURCHASE_LIMIT, count: dailyPurchaseCount, resetAt: nextGhanaMidnightIso() },
   };
 }
 function publicCard(card) {
@@ -717,7 +718,7 @@ function completeCardPayment(db, payment, provider) {
   }
   const purchaseDate = ghanaCalendarDate();
   const priceKey = purchasePriceKey(card);
-  const dailyRecord = db.dailyPurchaseCounts.find(item => item.userId === user.id && item.priceKey === priceKey && item.purchaseDate === purchaseDate);
+  const dailyRecord = db.dailyPurchaseCounts.find(item => item.userId === user.id && item.purchaseDate === purchaseDate);
   const orderId = uniqueReference(db, 'ORD');
   const purchaseReference = uniqueReference(db, 'PUR');
   const code = uniqueCode(db);
@@ -726,7 +727,7 @@ function completeCardPayment(db, payment, provider) {
   const purchase = { id: uid('order'), orderId, reference: purchaseReference, userId: user.id, cardId: card.id, idempotencyKey: payment.idempotencyKey, amount: purchaseAmount, amountPaid: purchaseAmount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, paymentReference: payment.transactionId, status: 'sealed', createdAt: now() };
   db.purchases.push(purchase);
   if (dailyRecord) dailyRecord.count = Number(dailyRecord.count || 0) + 1;
-  else db.dailyPurchaseCounts.push({ id: uid('daily'), userId: user.id, priceKey, purchaseDate, count: 1 });
+  else db.dailyPurchaseCounts.push({ id: uid('daily'), userId: user.id, purchaseDate, count: 1 });
   db.codes.push({ id: uid('code'), code, userId: user.id, cardId: card.id, orderId, purchaseId: purchase.id, amount: reward.rewardAmount, purchaseAmount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, status: 'unused', createdAt: now(), redeemedAt: null, redemptionReference: null });
   const related = { cardId: card.id, orderId, code, purchaseAmount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, provider, paymentReference: payment.transactionId, paystackReference: payment.paystackReference };
   transaction(db, { userId: user.id, type: 'debit', amount: purchaseAmount, account: 'external', reference: purchaseReference, reason: 'Card purchase', related });
@@ -1006,6 +1007,9 @@ function adminSafeUser(user, db) {
     kycStatus: user.kycStatus || KYC_STATUS.NOT_VERIFIED,
     kycVerifiedAt: user.kycVerifiedAt || null,
     kycSubmittedAt: user.kycSubmittedAt || null,
+    blocked: Boolean(user.blocked),
+    blockedAt: user.blockedAt || null,
+    blockedReason: user.blockedReason || null,
     hasPin: Boolean(user.pinHash),
     purchaseCount: purchases.length,
     redemptionCount: redemptions.length,
@@ -1124,7 +1128,12 @@ function cardPaymentCallbackUrl(req, transactionId, browserOrigin = '') {
   const origin = browser || requestOrigin(req);
   return `${origin}/?card_payment=1&transactionId=${encodeURIComponent(transactionId)}`;
 }
-function requireUser(req, res, db) { const user = userFor(req, db); if (!user) { fail(res, 401, 'Please sign in.'); return null; } return user; }
+function requireUser(req, res, db) {
+  const user = userFor(req, db);
+  if (!user) { fail(res, 401, 'Please sign in.'); return null; }
+  if (user.blocked) { fail(res, 403, 'Your account has been blocked. Contact support for help.'); return null; }
+  return user;
+}
 function staticFile(req, res, file) { const safe = path.normalize(file).replace(/^\.\.([/\\]|$)/, ''); const target = path.join(ROOT, safe === '/' ? 'index.html' : safe); if (!target.startsWith(ROOT) || !fs.existsSync(target)) return false; const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg', '.css': 'text/css', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml' }; const contentType = types[path.extname(target)] || 'application/octet-stream'; if (path.extname(target) === '.html') { const origin = requestOrigin(req); const html = fs.readFileSync(target, 'utf8').split('__ORIGIN__').join(origin); res.writeHead(200, { 'content-type': contentType, 'cache-control': 'no-store, max-age=0' }); res.end(html); return true; } res.writeHead(200, { 'content-type': contentType, 'cache-control': 'no-store, max-age=0' }); fs.createReadStream(target).pipe(res); return true; }
 function appBaseUrlPortMismatch() {
   try {
@@ -1175,15 +1184,15 @@ async function handlePurchaseRequest(req, res) {
     if (!card || card.stock < 1) { fail(res, 404, 'This card is unavailable.'); return { done: true }; }
     const purchaseDate = ghanaCalendarDate();
     const priceKey = purchasePriceKey(card);
-    const dailyRecord = db.dailyPurchaseCounts.find(item => item.userId === user.id && item.priceKey === priceKey && item.purchaseDate === purchaseDate);
+    const dailyRecord = db.dailyPurchaseCounts.find(item => item.userId === user.id && item.purchaseDate === purchaseDate);
     const purchasedToday = Number(dailyRecord?.count || 0);
-    const pendingToday = db.cardPayments.filter(item => item.userId === user.id && item.priceKey === priceKey && item.purchaseDate === purchaseDate && cardPaymentIsActive(item)).length;
+    const pendingToday = db.cardPayments.filter(item => item.userId === user.id && item.purchaseDate === purchaseDate && cardPaymentIsActive(item)).length;
     if (purchasedToday >= DAILY_CARD_PURCHASE_LIMIT) {
-      fail(res, 409, `Your purchase limit for ${priceTierLabel(priceKey)} cards has been reached for today. It resets at midnight Ghana time.`);
+      fail(res, 409, `Your daily purchase limit of ${DAILY_CARD_PURCHASE_LIMIT} cards has been reached for today. It resets at midnight Ghana time.`);
       return { done: true };
     }
     if (purchasedToday + pendingToday >= DAILY_CARD_PURCHASE_LIMIT) {
-      fail(res, 409, `You already have unfinished payments for ${priceTierLabel(priceKey)} cards. Finish them, or wait up to ${Math.round(PAYMENT_SESSION_MS / 60000)} minutes for them to expire, then try again.`);
+      fail(res, 409, `You already have unfinished payments counting toward today's ${DAILY_CARD_PURCHASE_LIMIT}-card daily limit. Finish them, or wait up to ${Math.round(PAYMENT_SESSION_MS / 60000)} minutes for them to expire, then try again.`);
       return { done: true };
     }
 
@@ -1478,8 +1487,42 @@ async function route(req, res) {
     if (req.method === 'POST' && /^\/api\/admin\/withdrawals\/[^/]+\/reject$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const ref = decodeURIComponent(pathname.split('/')[4]); const withdrawal = db.withdrawals.find(item => item.reference === ref); if (!withdrawal) return fail(res, 404, 'Withdrawal was not found.'); const before = { ...withdrawal }; const p = await body(req); const rejected = rejectWithdrawal(db, withdrawal, p.note); adminAudit(db, { admin, action: 'withdrawal.reject', targetType: 'withdrawal', targetId: ref, before, after: { ...withdrawal }, reason: p.note }); save(db); console.log('[withdrawal:rejected]', ref); return json(res, 200, { ok: true, withdrawal: publicWithdrawal(rejected.withdrawal), transaction: rejected.transaction && publicTransaction(rejected.transaction), receipt: rejected.receipt && publicReceipt(rejected.receipt) }); }
     if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/kyc\/verify$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const userId = decodeURIComponent(pathname.split('/')[4]); const target = db.users.find(item => item.id === userId); if (!target) return fail(res, 404, 'User was not found.'); const p = await body(req); const before = { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt }; target.kycStatus = KYC_STATUS.VERIFIED; target.kycVerifiedAt = now(); const released = markWithdrawalKycReady(db, target.id, p.note); adminAudit(db, { admin, action: 'kyc.verify', targetType: 'user', targetId: userId, before, after: { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt, releasedWithdrawals: released.map(item => item.reference) }, reason: p.note }); save(db); console.log('[kyc:verified]', userId, released.length); return json(res, 200, { ok: true, user: adminSafeUser(target, db), releasedWithdrawals: released.map(publicWithdrawal) }); }
     if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/kyc\/reject$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const userId = decodeURIComponent(pathname.split('/')[4]); const target = db.users.find(item => item.id === userId); if (!target) return fail(res, 404, 'User was not found.'); const p = await body(req); const before = { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt }; target.kycStatus = KYC_STATUS.REJECTED; target.kycVerifiedAt = null; adminAudit(db, { admin, action: 'kyc.reject', targetType: 'user', targetId: userId, before, after: { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt }, reason: p.note }); save(db); console.log('[kyc:rejected]', userId); return json(res, 200, { ok: true, user: adminSafeUser(target, db) }); }
+    if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/block$/.test(pathname)) {
+      const admin = requireAdmin(req, res, db); if (!admin) return;
+      const userId = decodeURIComponent(pathname.split('/')[4]);
+      const target = db.users.find(item => item.id === userId);
+      if (!target) return fail(res, 404, 'User was not found.');
+      const p = await body(req);
+      const before = { blocked: Boolean(target.blocked), blockedReason: target.blockedReason || null };
+      target.blocked = true;
+      target.blockedAt = now();
+      target.blockedReason = String(p.note || '').trim().slice(0, 500) || null;
+      // Cut off any session immediately rather than waiting for it to expire or for the
+      // next login attempt — requireUser() also re-checks blocked on every request, so
+      // this is belt-and-suspenders for anyone already mid-session.
+      db.sessions = db.sessions.filter(session => session.userId !== target.id);
+      adminAudit(db, { admin, action: 'user.block', targetType: 'user', targetId: userId, before, after: { blocked: true, blockedAt: target.blockedAt, blockedReason: target.blockedReason }, reason: p.note });
+      save(db);
+      console.log('[user:blocked]', userId);
+      return json(res, 200, { ok: true, user: adminSafeUser(target, db) });
+    }
+    if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/unblock$/.test(pathname)) {
+      const admin = requireAdmin(req, res, db); if (!admin) return;
+      const userId = decodeURIComponent(pathname.split('/')[4]);
+      const target = db.users.find(item => item.id === userId);
+      if (!target) return fail(res, 404, 'User was not found.');
+      const p = await body(req);
+      const before = { blocked: Boolean(target.blocked), blockedReason: target.blockedReason || null };
+      target.blocked = false;
+      target.blockedAt = null;
+      target.blockedReason = null;
+      adminAudit(db, { admin, action: 'user.unblock', targetType: 'user', targetId: userId, before, after: { blocked: false }, reason: p.note });
+      save(db);
+      console.log('[user:unblocked]', userId);
+      return json(res, 200, { ok: true, user: adminSafeUser(target, db) });
+    }
     if (req.method === 'POST' && pathname === '/api/auth/signup') { const p = await body(req); const email = normalizeEmail(p.email); const phone = normalizePhone(p.phone); if (!p.name?.trim() || !validMobile(phone)) return fail(res, 400, 'Enter your full name and a 10-digit mobile number that starts with 0.'); if (!validGmail(email)) return fail(res, 400, 'Email must be a valid @gmail.com address.'); if (String(p.password || '').length < 6) return fail(res, 400, 'Password must be at least 6 characters.'); if (db.users.some(u => normalizePhone(u.phone) === phone)) return fail(res, 409, 'An account already exists for this mobile number.'); if (db.users.some(u => normalizeEmail(u.email) === email)) return fail(res, 409, 'An account already exists for this email.'); const user = { id: uid('usr'), name: p.name.trim(), email, phone, contactEmailCapturedAt: now(), passwordHash: await hash(p.password), pinHash: null, walletBalance: 0, redeemedBalance: 0, kycStatus: KYC_STATUS.NOT_VERIFIED, kycVerifiedAt: null, createdAt: now() }; db.users.push(user); const token = crypto.randomBytes(32).toString('hex'); db.sessions.push({ token, userId: user.id, expiresAt: Date.now() + SESSION_MAX_AGE }); save(db); return json(res, 201, publicState(db, user), { 'set-cookie': sessionCookie(token, req) }); }
-    if (req.method === 'POST' && pathname === '/api/auth/login') { const p = await body(req); const identifier = String(p.email || '').trim(); const user = db.users.find(u => normalizeEmail(u.email) === normalizeEmail(identifier) || normalizePhone(u.phone) === normalizePhone(identifier)); if (!user || !await passwordMatches(p.password || '', user.passwordHash)) return fail(res, 401, 'Incorrect email or mobile number, or password.'); const token = crypto.randomBytes(32).toString('hex'); db.sessions.push({ token, userId: user.id, expiresAt: Date.now() + SESSION_MAX_AGE }); save(db); return json(res, 200, publicState(db, user), { 'set-cookie': sessionCookie(token, req) }); }
+    if (req.method === 'POST' && pathname === '/api/auth/login') { const p = await body(req); const identifier = String(p.email || '').trim(); const user = db.users.find(u => normalizeEmail(u.email) === normalizeEmail(identifier) || normalizePhone(u.phone) === normalizePhone(identifier)); if (!user || !await passwordMatches(p.password || '', user.passwordHash)) return fail(res, 401, 'Incorrect email or mobile number, or password.'); if (user.blocked) return fail(res, 403, 'Your account has been blocked. Contact support for help.'); const token = crypto.randomBytes(32).toString('hex'); db.sessions.push({ token, userId: user.id, expiresAt: Date.now() + SESSION_MAX_AGE }); save(db); return json(res, 200, publicState(db, user), { 'set-cookie': sessionCookie(token, req) }); }
     if (req.method === 'POST' && pathname === '/api/auth/logout') { const token = cookie(req).phantom_session; db.sessions = db.sessions.filter(s => s.token !== token); save(db); return json(res, 200, { ok: true }, { 'set-cookie': clearSessionCookie(req) }); }
     if (req.method === 'POST' && pathname === '/api/auth/forgot') {
       const p = await body(req);

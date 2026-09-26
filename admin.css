@@ -154,7 +154,7 @@ td small { display: block; margin-top: 4px; color: var(--faint); font-size: 9px;
 .status { display: inline-flex; align-items: center; min-height: 22px; padding: 3px 8px; border-radius: 99px; color: var(--muted); background: var(--surface-soft); font-size: 9px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
 .status.pending, .status.PENDING, .status.PENDING_KYC_VERIFICATION, .status.initialized, .status.PAYMENT_INITIALIZED { color: #94640a; background: var(--gold-soft); }
 .status.approved, .status.completed, .status.SUCCESS, .status.success, .status.VERIFIED, .status.redeemed { color: #287953; background: var(--green-soft); }
-.status.rejected, .status.REJECTED, .status.failed, .status.FAILED { color: #ac4141; background: var(--red-soft); }
+.status.rejected, .status.REJECTED, .status.failed, .status.FAILED, .status.blocked { color: #ac4141; background: var(--red-soft); }
 .status.NOT_VERIFIED { color: var(--muted); background: var(--surface-soft); }
 .row-actions { display: flex; gap: 6px; }
 .tiny-button { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border-dark); color: var(--text); background: var(--surface); font-size: 10px; font-weight: 800; }
