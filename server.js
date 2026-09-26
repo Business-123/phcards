@@ -71,6 +71,12 @@ const WITHDRAWAL_STATUS = {
 };
 const CODE_PATTERN = /^[A-Z]{2}[A-Z0-9]{12}$/;
 const GHS_PER_USD = 12;
+// Custom GHS charge for specific USD tiers that don't follow the flat 12:1 rate.
+// The $4 tier is priced at 45 GHS instead of the standard 48 GHS (4 * 12).
+const PRICE_OVERRIDES_GHS = { 4: 45 };
+const GHS_OVERRIDE_TO_USD = Object.fromEntries(Object.entries(PRICE_OVERRIDES_GHS).map(([usd, ghs]) => [ghs, Number(usd)]));
+function ghsForUsd(usd) { return PRICE_OVERRIDES_GHS[usd] !== undefined ? PRICE_OVERRIDES_GHS[usd] : money(usd * GHS_PER_USD); }
+function usdForGhs(priceGhs) { return GHS_OVERRIDE_TO_USD[priceGhs] !== undefined ? GHS_OVERRIDE_TO_USD[priceGhs] : money(priceGhs / GHS_PER_USD); }
 // Purchase-limit tiers: the daily 2-card cap applies per *tier*, not per
 // exact price — buying two cards from anywhere in a tier (e.g. one $4 card
 // and one $5 card) exhausts that whole tier for the day.
@@ -139,7 +145,7 @@ function stableToken(seed, length) {
   return value;
 }
 function rewardBandFor(priceGhs) {
-  const priceUsd = money(priceGhs / GHS_PER_USD);
+  const priceUsd = usdForGhs(priceGhs);
   return REWARD_BANDS.find(band => priceUsd >= band.minUsd && priceUsd <= band.maxUsd) || REWARD_BANDS[REWARD_BANDS.length - 1];
 }
 function rewardRangeForPrice(priceGhs) {
@@ -199,7 +205,7 @@ function nextGhanaMidnightIso(value = Date.now()) {
   return next.toISOString();
 }
 function purchasePriceKey(card) {
-  const priceUsd = money(Number(card?.displayPriceUsd ?? (Number(card?.priceGhs || card?.price || 0) / GHS_PER_USD)));
+  const priceUsd = money(Number(card?.displayPriceUsd ?? usdForGhs(Number(card?.priceGhs || card?.price || 0))));
   const tier = PRICE_TIERS.find(t => priceUsd >= t.min && priceUsd <= t.max);
   return tier ? tier.key : priceUsd.toFixed(2);
 }
@@ -217,17 +223,18 @@ function seeded(n) { let x = n >>> 0; return () => ((x = (x * 1664525 + 10139042
 function makeCards() {
   const categories = ['Digital', 'Gaming', 'Crypto', 'Collectible', 'Access', 'Exclusive', 'Limited', 'Rare'];
   const visuals = ['205,220,235', '176,124,255', '94,215,255', '245,166,35', '143,232,196', '255,106,145', '131,147,255', '255,210,122'];
-  const prices = [48, 60, 72, 84, 96, 108, 120, 144, 168, 192, 216, 240, 288, 336, 420, 480, 540, 600];
+  const usdPrices = [4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 35, 40, 45, 50];
   const random = seeded(0x5048414e);
   return Array.from({ length: 80 }, (_, i) => {
     const category = categories[i % categories.length]; const tier = ['Founders', 'Vault', 'Prime', 'Signature', 'Reserve', 'Crown'][Math.floor(i / categories.length) % 6];
-    const priceGhs = prices[i % prices.length];
+    const usdPrice = usdPrices[i % usdPrices.length];
+    const priceGhs = ghsForUsd(usdPrice);
     const seed = 0x5048414e + i;
     const serial = stableToken(seed, 8);
     const stock = i % 17 === 0 ? 0 : 8 + Math.floor(random() * 42);
     const band = rewardBandFor(priceGhs);
     const rewardRange = rewardRangeForPrice(priceGhs);
-    return { id: `CARD-${String(i + 1).padStart(4, '0')}`, seed, serial, title: `${category} ${tier} ${serial.slice(0, 4)}`, category, price: priceGhs, priceGhs, displayPriceUsd: money(priceGhs / GHS_PER_USD), stock, active: stock > 0, series: `${category.slice(0, 3).toUpperCase()}-${serial.slice(0, 5)}`, edition: serial.slice(5), rgb: visuals[i % visuals.length], rewardBand: band.key, rewardMinRate: band.minRate, rewardMaxRate: band.maxRate, rewardMinAmount: rewardRange.min, rewardMaxAmount: rewardRange.max, description: `${category} ${tier.toLowerCase()} sealed card with a ${band.label.toLowerCase()} reward band.` };
+    return { id: `CARD-${String(i + 1).padStart(4, '0')}`, seed, serial, title: `${category} ${tier} ${serial.slice(0, 4)}`, category, price: priceGhs, priceGhs, displayPriceUsd: usdPrice, stock, active: stock > 0, series: `${category.slice(0, 3).toUpperCase()}-${serial.slice(0, 5)}`, edition: serial.slice(5), rgb: visuals[i % visuals.length], rewardBand: band.key, rewardMinRate: band.minRate, rewardMaxRate: band.maxRate, rewardMinAmount: rewardRange.min, rewardMaxAmount: rewardRange.max, description: `${category} ${tier.toLowerCase()} sealed card with a ${band.label.toLowerCase()} reward band.` };
   });
 }
 function blankDb() { return { version: 5, cards: makeCards(), users: [], sessions: [], adminSessions: [], adminAuditLogs: [], deposits: [], cardPayments: [], purchases: [], dailyPurchaseCounts: [], codes: [], methods: [], withdrawals: [], transactions: [], receipts: [], passwordResets: [], kycBypassPayments: [] }; }
@@ -251,7 +258,7 @@ function syncCardCatalog(cards) {
       description: template.description || `${card.category || template.category || 'Digital'} sealed card with a ${band.label.toLowerCase()} reward band.`,
       price: priceGhs,
       priceGhs,
-      displayPriceUsd: money(priceGhs / GHS_PER_USD),
+      displayPriceUsd: usdForGhs(priceGhs),
       stock,
       active: stock > 0,
       rewardBand: band.key,
@@ -558,7 +565,11 @@ function originAllowed(req) {
 }
 function publicState(db, user) {
   const userId = user.id; const cardMap = new Map(db.cards.map(c => [c.id, c]));
-  const cards = db.cards.map(publicCard);
+  // Only ever show cards from the $4-and-up tiers in the shop. This is a safety net that
+  // hides any card priced below the lowest official tier (e.g. a stray $3 card created by
+  // a past manual edit) without deleting the record, so purchase/redemption history for it
+  // stays intact.
+  const cards = db.cards.filter(c => Number(c.displayPriceUsd) >= 4).map(publicCard);
   const codes = db.codes.filter(x => x.userId === userId).map(x => publicCode(x, cardMap.get(x.cardId)));
   const txs = db.transactions.filter(x => x.userId === userId).map(publicTransaction).sort((a,b) => b.createdAt.localeCompare(a.createdAt));
   const receipts = db.receipts.filter(x => x.userId === userId).map(publicReceipt).sort((a,b) => b.createdAt.localeCompare(a.createdAt));

@@ -8545,7 +8545,7 @@
             if (!requireAuth('detail')) return;
             navigateTo('detail');
             const container = document.getElementById('detailContent');
-            const ghsEstimate = +(card.price * 12).toFixed(2);
+            const ghsEstimate = +(Number(card.actualPrice ?? card.priceGhs ?? card.price * 12)).toFixed(2);
             const visual = getCardVisual(card);
             const faceStyle =
                 `background: linear-gradient(135deg, rgba(${visual.rgb},0.22) 0%, rgba(${visual.rgb},0.04) 42%, #14141f 80%); --card-rgb:${visual.rgb};`;
