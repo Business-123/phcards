@@ -2550,4 +2550,16 @@
             initPullToRefresh();
         }
     });
+
+    // If the page is restored from the browser's back/forward cache (e.g. the user hits
+    // Back from the external Paystack checkout instead of completing/cancelling it there),
+    // the DOM is restored exactly as it was left — including any scroll lock set while a
+    // modal or checkout sheet was open — but none of the code that would normally clear
+    // that lock runs again. Force it clear here so the page is always scrollable again.
+    window.addEventListener('pageshow', event => {
+        if (!event.persisted) return;
+        document.body.style.overflow = '';
+        closePurchaseModal();
+        closeFlowSheet();
+    });
 })();
