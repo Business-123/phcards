@@ -6329,13 +6329,36 @@
            ================================================================ */
         .app-header { height: 74px; padding: 0 20px; }
         .app-header .header-actions { gap: 8px; }
-        .app-header .header-actions .icon-btn.header-refresh {
-            width: 30px; height: 30px; border: 0; background: transparent;
-            color: var(--text-secondary); box-shadow: none;
-        }
-        .app-header .header-actions .icon-btn.header-refresh svg { width: 16px; height: 16px; }
-        .header-refresh.is-refreshing svg, .shop-refresh.is-refreshing svg { animation: refreshSpin .7s linear infinite; }
         @keyframes refreshSpin { to { transform: rotate(360deg); } }
+
+        /* ================================================================
+           PULL TO REFRESH — Snapchat-style drag-down indicator
+           ================================================================ */
+        .ptr-indicator {
+            position: fixed;
+            top: 0;
+            left: 50%;
+            width: 38px;
+            height: 38px;
+            margin-left: -19px;
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            box-shadow: 0 8px 22px rgba(0,0,0,.18);
+            color: var(--accent);
+            z-index: 3000;
+            opacity: 0;
+            transform: translateY(-60px);
+            pointer-events: none;
+            transition: opacity .18s ease;
+            will-change: transform;
+        }
+        .ptr-indicator.ptr-visible { opacity: 1; }
+        .ptr-indicator.ptr-animate { transition: transform .28s cubic-bezier(.2,.8,.2,1), opacity .18s ease; }
+        .ptr-indicator svg { width: 18px; height: 18px; }
+        .ptr-indicator.ptr-loading svg { animation: refreshSpin .7s linear infinite; }
 
         #page-shop { padding-top: 10px; }
         #page-shop .container.shop-page-shell { max-width: 800px; padding: 0 20px calc(108px + var(--safe-bottom)); }
@@ -6344,8 +6367,6 @@
         .shop-kicker { color: var(--text-secondary); font-size: .72rem; font-weight: 800; letter-spacing: .1em; }
         .shop-heading h1 { margin-top: 8px; color: var(--text-primary); font-size: clamp(1.8rem, 8vw, 2.55rem); font-weight: 800; letter-spacing: -.055em; line-height: 1.04; }
         .shop-heading > p:last-child { margin-top: 8px; color: var(--text-secondary); font-size: .9rem; line-height: 1.35; }
-        .shop-refresh { display: grid; place-items: center; width: 30px; height: 30px; margin-top: 18px; flex: 0 0 30px; border: 1px solid var(--border); border-radius: 50%; color: var(--text-secondary); background: var(--surface); }
-        .shop-refresh svg { width: 14px; height: 14px; }
         .shop-hero-stepper { display: none !important; }
         .shop-filter-groups { display: grid; gap: 10px; margin-bottom: 8px; }
         .shop-filter-group { min-width: 0; }
@@ -6387,7 +6408,6 @@
         .settings-heading-row { align-items: center; margin-bottom: 18px; }
         .settings-heading-row .screen-heading { margin: 0; }
         .settings-heading-row .screen-heading h1 { font-size: 1.7rem; }
-        .settings-heading-row .shop-refresh { margin: 0; }
         .settings-profile { display: flex; align-items: center; gap: 12px; padding: 16px; border: 1px solid var(--border); border-radius: 17px; background: var(--surface); box-shadow: var(--shadow-soft); }
         .settings-avatar { display: grid; width: 46px; height: 46px; flex: 0 0 46px; place-items: center; border-radius: 50%; color: var(--text-primary); background: #FFF0CC; border: 1px solid #E5C570; font-size: .88rem; font-weight: 800; }
         .settings-profile-copy { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 4px; }
@@ -6480,6 +6500,9 @@
 </head>
 <body class="auth-flow app-booting">
 
+    <!-- ========== PULL TO REFRESH ========== -->
+    <div class="ptr-indicator" id="ptrIndicator" aria-hidden="true"><i data-lucide="refresh-cw"></i></div>
+
     <!-- ========== TOAST CONTAINER ========== -->
     <div class="toast-container" id="toastContainer"></div>
 
@@ -6550,9 +6573,6 @@
             <span>✦</span> PHANTOM <span>CARDS</span>
         </div>
         <div class="header-actions">
-            <button class="icon-btn header-refresh" id="headerRefresh" type="button" onclick="refreshCurrentPage(this)" aria-label="Refresh current page" title="Refresh">
-                <i data-lucide="refresh-cw"></i>
-            </button>
             <button class="avatar" id="avatarDisplay" type="button" onclick="toggleDrawer()" aria-label="Open menu">JD</button>
         </div>
     </header>
@@ -6615,9 +6635,6 @@
                     <h1>Choose your card</h1>
                     <p>Get authentic cards at the best rates.</p>
                 </div>
-                <button class="shop-refresh" type="button" onclick="refreshCurrentPage(this)" aria-label="Refresh card inventory" title="Refresh inventory">
-                    <i data-lucide="refresh-cw"></i>
-                </button>
             </div>
             <!-- Auto-rotating "how to buy" stepper — Live Ledger v2 -->
             <div class="shop-hero-stepper" id="shsStepper" data-slide="0">
@@ -7076,9 +7093,6 @@
                     <h1>Settings</h1>
                     <p>Manage your profile and security.</p>
                 </div>
-                <button class="shop-refresh" type="button" onclick="refreshCurrentPage(this)" aria-label="Refresh settings" title="Refresh">
-                    <i data-lucide="refresh-cw"></i>
-                </button>
             </div>
             <section class="settings-profile" aria-label="Profile">
                 <div class="settings-avatar" id="settingsAvatar">PC</div>

@@ -178,6 +178,90 @@
         }
     };
 
+    // ================================================================
+    // PULL TO REFRESH — a Snapchat-style drag-down gesture. The body is
+    // the app's only scroll container (see the `overscroll-behavior-y:
+    // none` reset), so a pull is any downward touch drag that starts
+    // while the page is already scrolled to the top.
+    // ================================================================
+    function initPullToRefresh() {
+        const indicator = byId('ptrIndicator');
+        if (!indicator || !('ontouchstart' in window || navigator.maxTouchPoints > 0)) return;
+        const THRESHOLD = 68;
+        const MAX_PULL = 96;
+        const RESIST = 1.9;
+        let startY = 0;
+        let pulling = false;
+        let dragging = false;
+        let refreshing = false;
+        let pullDistance = 0;
+
+        const canPull = () => state.isLoggedIn
+            && !refreshing
+            && !document.body.classList.contains('auth-flow')
+            && !document.body.classList.contains('app-booting')
+            && window.scrollY <= 0
+            && !document.querySelector('.overlay.open, .drawer.open');
+
+        const setIndicator = (distance, animate) => {
+            indicator.classList.toggle('ptr-animate', Boolean(animate));
+            indicator.classList.toggle('ptr-visible', distance > 4);
+            const travel = Math.min(distance, MAX_PULL);
+            indicator.style.transform = `translateY(${-60 + travel}px)`;
+            const spins = Math.min(distance / THRESHOLD, 1) * 360;
+            indicator.querySelector('svg').style.transform = `rotate(${spins}deg)`;
+        };
+
+        const reset = () => {
+            indicator.classList.add('ptr-animate');
+            indicator.classList.remove('ptr-visible', 'ptr-loading');
+            indicator.style.transform = 'translateY(-60px)';
+        };
+
+        document.addEventListener('touchstart', event => {
+            if (!canPull() || event.touches.length !== 1) { dragging = false; return; }
+            startY = event.touches[0].clientY;
+            dragging = true;
+            pulling = false;
+            pullDistance = 0;
+        }, { passive: true });
+
+        document.addEventListener('touchmove', event => {
+            if (!dragging || refreshing) return;
+            const delta = event.touches[0].clientY - startY;
+            if (delta <= 0 || window.scrollY > 0) { pulling = false; return; }
+            pulling = true;
+            event.preventDefault();
+            pullDistance = delta / RESIST;
+            setIndicator(pullDistance, false);
+        }, { passive: false });
+
+        document.addEventListener('touchend', async () => {
+            if (!dragging) return;
+            dragging = false;
+            if (!pulling) return;
+            pulling = false;
+            if (pullDistance >= THRESHOLD) {
+                refreshing = true;
+                indicator.classList.add('ptr-animate', 'ptr-loading', 'ptr-visible');
+                indicator.style.transform = `translateY(${-60 + Math.min(THRESHOLD, MAX_PULL)}px)`;
+                try {
+                    await refresh('pull-to-refresh');
+                } catch (e) {
+                    showToast('error', e.message || 'Could not refresh right now.');
+                } finally {
+                    refreshing = false;
+                    indicator.classList.remove('ptr-loading');
+                    reset();
+                }
+            } else {
+                reset();
+            }
+        }, { passive: true });
+
+        document.addEventListener('touchcancel', () => { dragging = false; pulling = false; reset(); }, { passive: true });
+    }
+
     function busy(button, value) {
         if (!button) return;
         button.disabled = value;
@@ -2461,6 +2545,7 @@
         } finally {
             document.body.classList.remove('app-booting');
             startBackgroundRefresh();
+            initPullToRefresh();
         }
     });
 })();

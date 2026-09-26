@@ -25,6 +25,33 @@ body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--
 button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
 .is-hidden { display: none !important; }
+
+/* Pull to refresh — Snapchat-style drag-down indicator */
+.ptr-indicator {
+    position: fixed;
+    top: 0;
+    left: 50%;
+    width: 36px;
+    height: 36px;
+    margin-left: -18px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+    color: var(--gold-dark);
+    z-index: 500;
+    opacity: 0;
+    transform: translateY(-58px);
+    pointer-events: none;
+    transition: opacity .18s ease;
+    will-change: transform;
+}
+.ptr-indicator.ptr-visible { opacity: 1; }
+.ptr-indicator.ptr-animate { transition: transform .28s cubic-bezier(.2,.8,.2,1), opacity .18s ease; }
+.ptr-indicator svg { width: 17px; height: 17px; }
+.ptr-indicator.ptr-loading svg { animation: spin .7s linear infinite; }
 .admin-login { min-height: 100vh; display: grid; place-items: center; align-content: center; gap: 22px; padding: 28px; background: radial-gradient(circle at 50% -10%, #fffaf0 0, var(--bg) 48%); }
 .login-brand, .sidebar-brand { font-size: 17px; font-weight: 800; letter-spacing: -.04em; }
 .login-brand span, .sidebar-brand > span { color: var(--gold); margin-right: 7px; }

@@ -756,30 +756,46 @@ async function reconcileCardPayment(reference) {
     return [202, { message: 'Payment is still being confirmed. Please wait a moment.' }];
   });
 }
-// Same idea for the GHS 70 KYC-bypass fee.
-async function reconcileKycBypassPayment(db, payment) {
-  if (Date.parse(payment.expiresAt) <= Date.now() && ['initialized', 'PAYMENT_INITIALIZED'].includes(payment.status)) {
-    payment.status = 'expired'; payment.updatedAt = now(); save(db);
+// Same idea for the GHS 70 KYC-bypass fee. Takes just the reference (like
+// reconcileCardPayment) and re-loads fresh state inside the mutation lock,
+// rather than being handed a `payment` object from a possibly-stale `load()`
+// snapshot: mutating a detached object here would never actually persist,
+// which let this run more than once for the same payment (see git history).
+async function reconcileKycBypassPayment(reference) {
+  const before = load();
+  const known = before.kycBypassPayments.find(item => item.paystackReference === reference);
+  if (!known) return [404, { error: 'KYC bypass payment was not found.' }];
+  let verified = null;
+  if (['initialized', 'PAYMENT_INITIALIZED'].includes(known.status) && Date.parse(known.expiresAt) > Date.now()) {
+    verified = await hubCall('GET', `/transaction/verify/${encodeURIComponent(reference)}`);
   }
-  if (['initialized', 'PAYMENT_INITIALIZED'].includes(payment.status)) {
-    const verified = await hubCall('GET', `/transaction/verify/${encodeURIComponent(payment.paystackReference)}`);
-    if (Math.round(Number(verified.amount) * 100) !== Math.round(KYC_BYPASS_FEE * 100) || verified.currency !== PAYSTACK_CURRENCY) {
-      return [409, { error: 'Payment details did not reconcile.' }];
+  return withPurchaseMutation(async () => {
+    const db = load();
+    const payment = db.kycBypassPayments.find(item => item.paystackReference === reference);
+    if (!payment) return [404, { error: 'KYC bypass payment was not found.' }];
+    if (Date.parse(payment.expiresAt) <= Date.now() && ['initialized', 'PAYMENT_INITIALIZED'].includes(payment.status)) {
+      payment.status = 'expired'; payment.updatedAt = now();
     }
-    if (verified.status === 'SUCCESS') completeKycBypassPayment(db, payment, 'hub');
-    else if (['FAILED', 'ABANDONED'].includes(verified.status)) {
-      payment.status = 'failed'; payment.updatedAt = now();
-      const withdrawal = db.withdrawals.find(item => item.id === payment.withdrawalId && item.userId === payment.userId);
-      if (withdrawal && withdrawal.status === WITHDRAWAL_STATUS.PENDING_KYC_VERIFICATION) withdrawal.paymentStatus = 'failed';
+    if (verified && ['initialized', 'PAYMENT_INITIALIZED'].includes(payment.status)) {
+      if (Math.round(Number(verified.amount) * 100) !== Math.round(KYC_BYPASS_FEE * 100) || verified.currency !== PAYSTACK_CURRENCY) {
+        save(db);
+        return [409, { error: 'Payment details did not reconcile.' }];
+      }
+      if (verified.status === 'SUCCESS') completeKycBypassPayment(db, payment, 'hub');
+      else if (['FAILED', 'ABANDONED'].includes(verified.status)) {
+        payment.status = 'failed'; payment.updatedAt = now();
+        const withdrawal = db.withdrawals.find(item => item.id === payment.withdrawalId && item.userId === payment.userId);
+        if (withdrawal && withdrawal.status === WITHDRAWAL_STATUS.PENDING_KYC_VERIFICATION) withdrawal.paymentStatus = 'failed';
+      }
     }
     save(db);
-  }
-  if (payment.status === 'success') return [200, { redirect: payment.callbackUrl }];
-  if (['failed', 'expired'].includes(payment.status)) {
-    const origin = payment.callbackUrl ? new URL(payment.callbackUrl).origin : (APP_BASE_URL || '');
-    return [200, { redirect: `${origin}/?payment=${payment.status}` }];
-  }
-  return [202, { message: 'Payment is still being confirmed. Please wait a moment.' }];
+    if (payment.status === 'success') return [200, { redirect: payment.callbackUrl }];
+    if (['failed', 'expired'].includes(payment.status)) {
+      const origin = payment.callbackUrl ? new URL(payment.callbackUrl).origin : (APP_BASE_URL || '');
+      return [200, { redirect: `${origin}/?payment=${payment.status}` }];
+    }
+    return [202, { message: 'Payment is still being confirmed. Please wait a moment.' }];
+  });
 }
 function approveWithdrawal(db, withdrawal, adminNote = '') {
   normalizeWithdrawalRecord(withdrawal);
@@ -1239,7 +1255,7 @@ async function route(req, res) {
         if (cardPayment || kycPayment) {
           const [, result] = cardPayment
             ? await reconcileCardPayment(reference)
-            : await reconcileKycBypassPayment(load(), kycPayment);
+            : await reconcileKycBypassPayment(reference);
           if (result && result.redirect) destination = result.redirect;
         }
       } catch (error) {
@@ -1259,7 +1275,7 @@ async function route(req, res) {
       if (!cardPayment && !payment) return fail(res, 404, 'Payment session was not found.');
       try {
         if (cardPayment) return json(res, ...(await reconcileCardPayment(reference)));
-        return json(res, ...(await reconcileKycBypassPayment(db, payment)));
+        return json(res, ...(await reconcileKycBypassPayment(reference)));
       } catch (error) { return fail(res, 502, error.message || 'Payment verification failed.'); }
     }
     // The hub POSTs here the moment Paystack confirms (or fails) a charge — this is the
@@ -1284,21 +1300,23 @@ async function route(req, res) {
           return json(res, 200, { ok: true });
         });
       }
-      const payment = db.kycBypassPayments.find(x => x.paystackReference === reference);
-      if (!payment) return json(res, 200, { ok: true, unmatched: true });
-      {
+      if (!db.kycBypassPayments.some(x => x.paystackReference === reference)) return json(res, 200, { ok: true, unmatched: true });
+      return withPurchaseMutation(async () => {
+        const fresh = load();
+        const payment = fresh.kycBypassPayments.find(x => x.paystackReference === reference);
+        if (!payment) return json(res, 200, { ok: true, unmatched: true });
         const matches = Math.round(Number(event.amount) * 100) === Math.round(KYC_BYPASS_FEE * 100) && String(event.currency) === PAYSTACK_CURRENCY
           && event.metadata?.purpose === 'KYC_BYPASS' && event.metadata?.transactionId === payment.reference;
         if (!matches) { console.error('[hub:webhook] KYC bypass event did not reconcile', reference); return json(res, 200, { ok: true, mismatched: true }); }
-        if (status === 'SUCCESS') completeKycBypassPayment(db, payment, 'hub');
+        if (status === 'SUCCESS') completeKycBypassPayment(fresh, payment, 'hub');
         else if (payment.status !== 'success') {
           payment.status = 'failed'; payment.updatedAt = now();
-          const withdrawal = db.withdrawals.find(item => item.id === payment.withdrawalId && item.userId === payment.userId);
+          const withdrawal = fresh.withdrawals.find(item => item.id === payment.withdrawalId && item.userId === payment.userId);
           if (withdrawal && withdrawal.status === WITHDRAWAL_STATUS.PENDING_KYC_VERIFICATION) withdrawal.paymentStatus = 'failed';
         }
-      }
-      save(db);
-      return json(res, 200, { ok: true });
+        save(fresh);
+        return json(res, 200, { ok: true });
+      });
     }
     if (req.method === 'POST' && pathname === '/api/admin/auth/login') {
       if (!adminCredentialsConfigured()) return fail(res, 503, 'Admin credentials are not configured. Set ADMIN_EMAIL and ADMIN_PASSWORD_HASH (or ADMIN_PASSWORD).');
@@ -1605,6 +1623,14 @@ async function route(req, res) {
       if (!existing) db.kycBypassPayments.push(payment);
       withdrawal.paymentStatus = 'bypass_initialized';
       save(db);
+      // A still-live checkout already exists for this withdrawal (e.g. the user
+      // double-clicked, reopened the sheet, or retried after a slow response).
+      // Re-initializing with the hub would mint a second Paystack reference and
+      // overwrite this record's, orphaning the checkout the user may already be
+      // paying on. Hand back the same checkout instead of calling the hub again.
+      if (existing && existing.status === 'PAYMENT_INITIALIZED' && existing.authorizationUrl) {
+        return json(res, 201, { reference: payment.reference, withdrawal: publicWithdrawal(withdrawal), checkoutUrl: payment.authorizationUrl, amount: KYC_BYPASS_FEE, mode: 'hub', callbackUrl: payment.callbackUrl });
+      }
       const redirectUrl = `${hubReturnOrigin(req, p.returnOrigin)}/api/payment/return`;
       try {
         const result = await hubCall('POST', '/transaction/initialize', {

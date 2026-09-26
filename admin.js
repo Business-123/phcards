@@ -93,6 +93,88 @@
         try { await loadView(state.view, { silent: true }); } finally { backgroundRefreshInFlight = false; }
     }
 
+    // Pull to refresh — same Snapchat-style drag-down gesture as the customer
+    // app, reloading whatever admin view is currently open.
+    function initPullToRefresh() {
+        const indicator = $('#ptrIndicator');
+        if (!indicator || !('ontouchstart' in window || navigator.maxTouchPoints > 0)) return;
+        const THRESHOLD = 68;
+        const MAX_PULL = 96;
+        const RESIST = 1.9;
+        let startY = 0;
+        let pulling = false;
+        let dragging = false;
+        let refreshing = false;
+        let pullDistance = 0;
+
+        const canPull = () => !refreshing
+            && !$('#adminApp').classList.contains('is-hidden')
+            && window.scrollY <= 0
+            && !document.activeElement?.matches('input, textarea, select')
+            && !$('#sidebar').classList.contains('open')
+            && !$('#overlay').classList.contains('open')
+            && !$('#detailDrawer').classList.contains('open')
+            && !$('#actionModal').classList.contains('open');
+
+        const setIndicator = distance => {
+            indicator.classList.add('ptr-visible');
+            indicator.classList.remove('ptr-animate');
+            const travel = Math.min(distance, MAX_PULL);
+            indicator.style.transform = `translateY(${-58 + travel}px)`;
+            const spins = Math.min(distance / THRESHOLD, 1) * 360;
+            indicator.querySelector('svg').style.transform = `rotate(${spins}deg)`;
+        };
+
+        const reset = () => {
+            indicator.classList.add('ptr-animate');
+            indicator.classList.remove('ptr-visible', 'ptr-loading');
+            indicator.style.transform = 'translateY(-58px)';
+        };
+
+        document.addEventListener('touchstart', event => {
+            if (!canPull() || event.touches.length !== 1) { dragging = false; return; }
+            startY = event.touches[0].clientY;
+            dragging = true;
+            pulling = false;
+            pullDistance = 0;
+        }, { passive: true });
+
+        document.addEventListener('touchmove', event => {
+            if (!dragging || refreshing) return;
+            const delta = event.touches[0].clientY - startY;
+            if (delta <= 0 || window.scrollY > 0) { pulling = false; return; }
+            pulling = true;
+            event.preventDefault();
+            pullDistance = delta / RESIST;
+            setIndicator(pullDistance);
+        }, { passive: false });
+
+        document.addEventListener('touchend', async () => {
+            if (!dragging) return;
+            dragging = false;
+            if (!pulling) return;
+            pulling = false;
+            if (pullDistance >= THRESHOLD) {
+                refreshing = true;
+                indicator.classList.add('ptr-animate', 'ptr-loading', 'ptr-visible');
+                indicator.style.transform = `translateY(${-58 + Math.min(THRESHOLD, MAX_PULL)}px)`;
+                try {
+                    await loadView(state.view);
+                } catch (e) {
+                    toast(e.message || 'Could not refresh right now.');
+                } finally {
+                    refreshing = false;
+                    indicator.classList.remove('ptr-loading');
+                    reset();
+                }
+            } else {
+                reset();
+            }
+        }, { passive: true });
+
+        document.addEventListener('touchcancel', () => { dragging = false; pulling = false; reset(); }, { passive: true });
+    }
+
     function updateBadges() {
         const summary = state.summary; if (!summary) return;
         $('#withdrawalCount').textContent = summary.metrics.pendingWithdrawals || '';
@@ -113,7 +195,7 @@
     function renderUsers() { const data = state.cache.users; const rows = data.items.map(item => `<tr ${rowClick(item.id, 'user')}><td><strong>${escape(item.name)}</strong><small>${escape(item.id)} · ${escape(item.email || item.phone)}</small></td><td class="amount">${money(item.walletBalance)}</td><td class="amount">${money(item.redeemedBalance)}</td><td>${status(item.kycStatus)}</td><td>${escape(item.purchaseCount)} purchases<small>${escape(item.redemptionCount)} redemptions</small></td><td>${shortDate(item.createdAt)}</td></tr>`).join(''); return pageHeading('Users', 'Customer accounts, balances, verification, and activity.') + toolbar('Search name, email, phone, or ID…', `<select id="statusFilter"><option value="">All KYC states</option><option value="PENDING">Pending</option><option value="VERIFIED">Verified</option><option value="REJECTED">Rejected</option><option value="NOT_VERIFIED">Not verified</option></select>`) + `<section class="panel table-panel">${table(['User', 'Wallet Balance', 'Redeemed Balance', 'KYC', 'Activity', 'Joined'], rows, 'No users found.')}${pagination(data)}</section>`; }
     function renderCards() { const data = state.cache.cards; const rows = data.items.map(item => `<tr ${rowClick(item.id, 'card')}><td><strong>${escape(item.title)}</strong><small>${escape(item.id)} · ${escape(item.series)}</small></td><td>${escape(item.category)}</td><td>${escape(item.displayPriceUsd)} USD</td><td class="amount">${money(item.priceGhs)}</td><td class="amount">${escape(item.stock)}</td><td>${status(item.active ? 'active' : 'out of stock')}</td><td>${escape(item.rewardMinRate)}×–${escape(item.rewardMaxRate)}×<small>${escape(item.purchaseCount)} purchases · ${escape(item.redeemedCount)} redeemed</small></td></tr>`).join(''); return pageHeading('Cards', 'Catalog and aggregate inventory visibility.') + toolbar('Search card, category, series, or ID…') + `<section class="panel table-panel">${table(['Card', 'Category', 'USD price', 'GHS price', 'Stock', 'State', 'Reward range'], rows, 'No cards found.')}${pagination(data)}</section>`; }
     function renderPurchases() { const data = state.cache.purchases; const rows = data.items.map(item => `<tr ${rowClick(item.id, 'purchase')}><td><strong>${escape(item.orderId)}</strong><small>${escape(item.reference)}</small></td><td>${escape(item.userName)}<small>${escape(item.userEmail || item.userId)}</small></td><td>${escape(item.cardTitle)}<small>${escape(item.cardCategory)}</small></td><td class="amount">${money(item.amountPaid ?? item.amount)}</td><td>${status(item.codeStatus)}</td><td>${shortDate(item.createdAt)}</td></tr>`).join(''); return pageHeading('Purchases', 'Read-only order and redemption linkage.') + toolbar('Search order, reference, user, or card…') + `<section class="panel table-panel">${table(['Purchase', 'User', 'Card', 'Wallet debit', 'Code state', 'Purchased'], rows, 'No purchases found.')}${pagination(data)}</section>`; }
-    function renderDeposits() { const data = state.cache.deposits; const rows = data.items.map(item => `<tr ${rowClick(item.transactionId || item.id, 'deposit')}><td><strong>${escape(item.transactionId || item.id)}</strong><small>${escape(item.reference)}</small></td><td>${escape(item.userName)}<small>${escape(item.userEmail || item.userId)}</small></td><td class="amount">${money(item.amount)}</td><td>${status(item.status)}</td><td><strong>${escape(item.paystackReference || '—')}</strong></td><td>${shortDate(item.createdAt)}</td></tr>`).join(''); return pageHeading('Deposits', 'Wallet top-ups and external payment references.', '<button class="secondary-button" data-view-refresh>Refresh</button>') + toolbar('Search deposit, user, Paystack reference…', `<select id="statusFilter"><option value="">All statuses</option><option value="SUCCESS">Success</option><option value="PENDING">Pending</option><option value="PAYMENT_INITIALIZED">Initialized</option><option value="FAILED">Failed</option><option value="EXPIRED">Expired</option></select>`) + `<section class="panel table-panel">${table(['Site A deposit', 'User', 'Amount', 'Status', 'External references', 'Created'], rows, 'No deposits found.')}${pagination(data)}</section>`; }
+    function renderDeposits() { const data = state.cache.deposits; const rows = data.items.map(item => `<tr ${rowClick(item.transactionId || item.id, 'deposit')}><td><strong>${escape(item.transactionId || item.id)}</strong><small>${escape(item.reference)}</small></td><td>${escape(item.userName)}<small>${escape(item.userEmail || item.userId)}</small></td><td class="amount">${money(item.amount)}</td><td>${status(item.status)}</td><td><strong>${escape(item.paystackReference || '—')}</strong></td><td>${shortDate(item.createdAt)}</td></tr>`).join(''); return pageHeading('Deposits', 'Wallet top-ups and external payment references.') + toolbar('Search deposit, user, Paystack reference…', `<select id="statusFilter"><option value="">All statuses</option><option value="SUCCESS">Success</option><option value="PENDING">Pending</option><option value="PAYMENT_INITIALIZED">Initialized</option><option value="FAILED">Failed</option><option value="EXPIRED">Expired</option></select>`) + `<section class="panel table-panel">${table(['Site A deposit', 'User', 'Amount', 'Status', 'External references', 'Created'], rows, 'No deposits found.')}${pagination(data)}</section>`; }
     function renderRedemptions() { const data = state.cache.redemptions; const rows = data.items.map(item => `<tr ${rowClick(item.id, 'redemption')}><td>${escape(item.userName)}<small>${escape(item.userId)}</small></td><td><strong>${escape(item.cardTitle)}</strong><small>${escape(item.orderId)}</small></td><td class="amount">${money(item.rewardAmount)}</td><td>${escape(item.redemptionReference || '—')}</td><td>${shortDate(item.redeemedAt)}</td></tr>`).join(''); return pageHeading('Redemptions', 'Inspect code ownership, reward credits, and references.') + toolbar('Search user, card, order, or redemption reference…') + `<section class="panel table-panel">${table(['User', 'Card', 'Redeemed amount', 'Reference', 'Redeemed'], rows, 'No redemptions found.')}${pagination(data)}</section>`; }
     function renderWithdrawals() { const data = state.cache.withdrawals; const rows = data.items.map(item => `<tr ${rowClick(item.reference, 'withdrawal')}><td><strong>${escape(item.userName)}</strong><small>${escape(item.reference)}</small></td><td class="amount">${money(item.requestedAmount)}</td><td class="amount">${money(item.operationalCharge)}<small>Payout ${money(item.actualAmount)}</small></td><td>${escape(item.method?.network || '—')}<small>${escape(item.method?.phone || '')}</small></td><td>${status(item.userKycStatus)}</td><td>${status(item.status)}</td><td>${item.status === 'pending' ? `<div class="row-actions"><button class="tiny-button" data-action="approve" data-id="${escape(item.reference)}">Approve</button><button class="tiny-button danger" data-action="reject" data-id="${escape(item.reference)}">Reject</button></div>` : '—'}</td></tr>`).join(''); return pageHeading('Withdrawals', 'Review requested amount, charges, KYC, and payout state.') + toolbar('Search withdrawal, user, method, or reference…', `<select id="statusFilter"><option value="">All statuses</option><option value="pending">Needs review</option><option value="PENDING_KYC_VERIFICATION">KYC pending</option><option value="approved">Approved</option><option value="completed">Completed</option><option value="rejected">Rejected</option></select>`) + `<section class="panel table-panel">${table(['User / reference', 'Requested', 'Charge / payout', 'Method', 'KYC', 'Status', 'Actions'], rows, 'No withdrawals found.')}${pagination(data)}</section>`; }
     function renderKyc() { const data = state.cache.kyc; const rows = data.items.map(item => `<tr ${rowClick(item.id, 'kyc')}><td><strong>${escape(item.name)}</strong><small>${escape(item.id)} · ${escape(item.email || item.phone)}</small></td><td>${escape(item.documents?.length || 0)} documents</td><td>${shortDate(item.kycSubmittedAt || item.createdAt)}</td><td>${status(item.kycStatus)}</td><td>${item.kycStatus === 'PENDING' ? `<div class="row-actions"><button class="tiny-button" data-action="verify-kyc" data-id="${escape(item.id)}">Verify</button><button class="tiny-button danger" data-action="reject-kyc" data-id="${escape(item.id)}">Reject</button></div>` : '—'}</td></tr>`).join(''); return pageHeading('KYC review', 'Review submitted identity documents before releasing withdrawals.') + toolbar('Search user, email, phone, or ID…', `<select id="statusFilter"><option value="">All review states</option><option value="PENDING">Pending</option><option value="VERIFIED">Verified</option><option value="REJECTED">Rejected</option></select>`) + `<section class="panel table-panel">${table(['User', 'Documents', 'Submitted', 'Status', 'Actions'], rows, 'No KYC submissions found.')}${pagination(data)}</section>`; }
@@ -147,11 +229,9 @@
         const action = event.target.closest('[data-action]'); if (action) return openAction(action.dataset.action, action.dataset.id);
         const detail = event.target.closest('[data-detail-type]'); if (detail) return openDetail(detail.dataset.detailType, detail.dataset.detailId);
         const pageButton = event.target.closest('[data-page]'); if (pageButton && !pageButton.disabled) { state.page += pageButton.dataset.page === 'next' ? 1 : -1; return loadView(state.view); }
-        if (event.target.closest('[data-view-refresh]')) return loadView(state.view);
     });
     $('#adminLoginForm').addEventListener('submit', async event => { event.preventDefault(); $('#loginError').textContent = ''; try { const result = await api('/api/admin/auth/login', { method: 'POST', body: JSON.stringify({ email: $('#adminEmail').value, password: $('#adminPassword').value }) }); showApp(result.admin); } catch (error) { $('#loginError').textContent = error.message; } });
     $('#logoutButton').addEventListener('click', async () => { await api('/api/admin/auth/logout', { method: 'POST' }).catch(() => {}); showLogin('You have been signed out.'); });
-    $('#refreshButton').addEventListener('click', () => { $('#refreshButton').classList.add('is-busy'); loadView(state.view).finally(() => $('#refreshButton').classList.remove('is-busy')); });
     $('#mobileMenu').addEventListener('click', () => { $('#sidebar').classList.toggle('open'); $('#overlay').classList.toggle('open', $('#sidebar').classList.contains('open')); });
     $('#overlay').addEventListener('click', () => { $('#sidebar').classList.remove('open'); $('#overlay').classList.remove('open'); $('#detailDrawer').classList.remove('open'); });
     $('#drawerClose').addEventListener('click', () => { $('#detailDrawer').classList.remove('open'); $('#overlay').classList.remove('open'); });
@@ -162,4 +242,5 @@
     document.addEventListener('click', event => { if (event.target.id === 'applyFilters') { state.search = $('#viewSearch')?.value || ''; state.status = $('#statusFilter')?.value || ''; state.page = 1; loadView(state.view); } });
     document.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.id === 'viewSearch') $('#applyFilters')?.click(); });
     api('/api/admin/auth/session').then(result => showApp(result.admin)).catch(() => showLogin());
+    initPullToRefresh();
 })();
