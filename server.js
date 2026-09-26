@@ -244,7 +244,13 @@ function syncCardCatalog(cards) {
   const generatedMap = new Map(generated.map(card => [card.id, card]));
   return (Array.isArray(cards) && cards.length ? cards : generated).map(card => {
     const template = generatedMap.get(card.id) || card;
-    const priceGhs = money(card.priceGhs || card.price || template.priceGhs);
+    // A tier with an explicit override (see PRICE_OVERRIDES_GHS) always charges the
+    // overridden amount, even for a card that already exists in a live database with
+    // its old price saved on disk — otherwise a price change would only ever apply to
+    // brand-new cards and never correct one that was already sold under the old price.
+    const templateUsd = template.displayPriceUsd;
+    const overriddenGhs = templateUsd !== undefined && PRICE_OVERRIDES_GHS[templateUsd] !== undefined ? PRICE_OVERRIDES_GHS[templateUsd] : null;
+    const priceGhs = overriddenGhs !== null ? overriddenGhs : money(card.priceGhs || card.price || template.priceGhs);
     const seed = card.seed || template.seed || 0x5048414e;
     const band = rewardBandFor(priceGhs);
     const stock = Number.isFinite(Number(card.stock)) ? Math.max(0, Math.trunc(Number(card.stock))) : template.stock;
