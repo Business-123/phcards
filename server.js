@@ -248,8 +248,15 @@ function syncCardCatalog(cards) {
     // overridden amount, even for a card that already exists in a live database with
     // its old price saved on disk — otherwise a price change would only ever apply to
     // brand-new cards and never correct one that was already sold under the old price.
-    const templateUsd = template.displayPriceUsd;
-    const overriddenGhs = templateUsd !== undefined && PRICE_OVERRIDES_GHS[templateUsd] !== undefined ? PRICE_OVERRIDES_GHS[templateUsd] : null;
+    //
+    // The override must be decided from the card's OWN current USD price, not from a
+    // freshly regenerated template's guess at that ID's price. makeCards() assigns USD
+    // prices purely by array position, so if the tier layout ever shifts, a card's ID
+    // can end up mapped to a different position-based price than what it is actually
+    // listed and sold at — silently skipping the override for that specific card forever,
+    // even though every other card in the same $4 tier gets corrected correctly.
+    const currentUsd = card.displayPriceUsd !== undefined ? card.displayPriceUsd : template.displayPriceUsd;
+    const overriddenGhs = currentUsd !== undefined && PRICE_OVERRIDES_GHS[currentUsd] !== undefined ? PRICE_OVERRIDES_GHS[currentUsd] : null;
     const priceGhs = overriddenGhs !== null ? overriddenGhs : money(card.priceGhs || card.price || template.priceGhs);
     const seed = card.seed || template.seed || 0x5048414e;
     const band = rewardBandFor(priceGhs);
