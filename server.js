@@ -1072,13 +1072,19 @@ function adminDayKey(value) {
 function adminTrend(db, days = 14) {
   const result = Array.from({ length: days }, (_, index) => {
     const date = new Date(Date.now() - (days - index - 1) * 86400000);
-    return { date: date.toISOString().slice(0, 10), deposits: 0, purchases: 0, redemptions: 0, withdrawals: 0 };
+    return { date: date.toISOString().slice(0, 10), users: 0, spent: 0 };
   });
   const byDate = new Map(result.map(item => [item.date, item]));
-  db.deposits.forEach(item => { const row = byDate.get(adminDayKey(item.createdAt)); if (row) row.deposits += Number(item.amount || 0); });
-  db.purchases.forEach(item => { const row = byDate.get(adminDayKey(item.createdAt)); if (row) row.purchases += Number(item.amountPaid ?? item.amount ?? 0); });
-  db.codes.filter(item => item.status === 'redeemed').forEach(item => { const row = byDate.get(adminDayKey(item.redeemedAt)); if (row) row.redemptions += Number(item.rewardAmount ?? item.amount ?? 0); });
-  db.withdrawals.filter(item => !item.isRefund).forEach(item => { const row = byDate.get(adminDayKey(item.createdAt)); if (row) row.withdrawals += Number(item.requestedAmount ?? item.amount ?? 0); });
+  const windowStart = result[0].date;
+  // Users: a running (cumulative) count of registered accounts through each day.
+  const baselineUsers = db.users.filter(item => adminDayKey(item.createdAt) < windowStart).length;
+  const newUsersByDay = new Map();
+  db.users.forEach(item => { const key = adminDayKey(item.createdAt); if (byDate.has(key)) newUsersByDay.set(key, (newUsersByDay.get(key) || 0) + 1); });
+  let runningUsers = baselineUsers;
+  result.forEach(row => { runningUsers += newUsersByDay.get(row.date) || 0; row.users = runningUsers; });
+  // Spent: money users paid that day, combining card purchases and KYC verification (bypass) fees.
+  db.purchases.forEach(item => { const row = byDate.get(adminDayKey(item.createdAt)); if (row) row.spent += Number(item.amountPaid ?? item.amount ?? 0); });
+  (db.kycBypassPayments || []).filter(item => String(item.status).toLowerCase() === 'success').forEach(item => { const row = byDate.get(adminDayKey(item.verifiedAt || item.updatedAt || item.createdAt)); if (row) row.spent += Number(item.amount || 0); });
   return result;
 }
 function adminPurchaseRow(db, purchase) {
