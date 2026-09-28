@@ -58,7 +58,14 @@ test('admin can change how many redeemed cards a user needs before withdrawing, 
   const withdraw = () => asUser('/api/withdrawals', { method: 'POST', body: JSON.stringify({ amount: 10, methodId: 'none', pin: '0000' }) });
   const before = await withdraw();
   assert.equal(before.response.status, 400);
-  assert.match(before.data.error, /Redeem 3 more cards/);
+  assert.match(before.data.error, /Withdrawals start at GHS 100\.00\. Purchase and redeem your first card/, 'the GHS limit is checked before the card requirement');
+
+  // Below GHS 100 the limit notice wins; a user who has bought a card is told to redeem more instead.
+  // Credit the user GHS 150 of redeemed balance so the card requirement is what we test next.
+  const db = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+  db.transactions.push({ id: 'credit_limit_test', userId: signup.data.user.id, type: 'credit', amount: 150, account: 'redeemed', reference: 'REDEMPTION_LIMIT_TEST', status: 'completed', reason: 'Redeemed code', related: {}, createdAt: new Date().toISOString() });
+  fs.writeFileSync(dataFile, JSON.stringify(db));
+  assert.match((await withdraw()).data.error, /Redeem 3 more cards/, 'with GHS 100+ the card requirement applies next');
 
   const set = await asAdmin('/api/admin/settings/withdrawal-cards', { method: 'POST', body: JSON.stringify({ count: 5, note: 'tighten' }) });
   assert.equal(set.response.status, 200);

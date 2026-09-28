@@ -1,6 +1,10 @@
 /* PHANTOM CARDS API bridge. The page owns presentation; this module owns persisted product flows. */
 (function () {
-    const MIN_WITHDRAWAL = 10;
+    const DEFAULT_MIN_WITHDRAWAL = 100; // GHS; the live value arrives with the server state
+    function minWithdrawal() {
+        const n = Number(state.minWithdrawal);
+        return Number.isFinite(n) && n > 0 ? n : DEFAULT_MIN_WITHDRAWAL;
+    }
     // Default only: the live requirement is set by admins and arrives with every server state.
     const DEFAULT_REDEEMED_CARDS_FOR_WITHDRAWAL = 3;
     function requiredCardsForWithdrawal() {
@@ -113,6 +117,7 @@
             ...purchase,
             amountPaid: purchase.amountPaid ?? purchase.amount,
         }));
+        state.minWithdrawal = Number.isFinite(Number(data.minWithdrawal)) ? Number(data.minWithdrawal) : DEFAULT_MIN_WITHDRAWAL;
         state.withdrawalCardRequirement = Number.isFinite(Number(data.withdrawalCardRequirement)) ? Number(data.withdrawalCardRequirement) : DEFAULT_REDEEMED_CARDS_FOR_WITHDRAWAL;
         state.purchaseLimits = data.purchaseLimits || { date: '', max: 3, count: 0, resetAt: null };
         state.withdrawals = data.withdrawals || [];
@@ -1221,11 +1226,28 @@
     // ------------------------------------------------------------------
     let withdrawWizard = { amount: 0, methodId: '', pin: '' };
 
+    // The withdrawal limit: shown before the card requirement. A user who has never bought a
+    // card is told to buy their first one (its payout clears the limit); otherwise they are
+    // told how far their redeemed balance is from it.
+    function hasPurchasedPaidCard() {
+        return (state.purchases || []).some(item => !item.isFreeGift && Number(item.amountPaid ?? item.amount ?? 0) > 0);
+    }
+    function showWithdrawalLimitNotice() {
+        const limit = minWithdrawal();
+        const balance = Number(state.user?.redeemedBalance || 0);
+        const firstCard = !hasPurchasedPaidCard();
+        const body = firstCard
+            ? `<p class="text-secondary">Withdrawals start at <strong>GHS ${money(limit)}</strong>. Your redeemed balance is GHS ${money(balance)}.</p><p class="text-secondary" style="margin-top:10px;">Purchase and redeem your first card to reach the withdrawal limit — then you can continue to withdraw.</p>`
+            : `<p class="text-secondary">Withdrawals start at <strong>GHS ${money(limit)}</strong>. Your redeemed balance is GHS ${money(balance)}, so you need GHS ${money(Math.max(0, limit - balance))} more.</p><p class="text-secondary" style="margin-top:10px;">Redeem more cards to reach the limit.</p>`;
+        return openFlowSheet({ title: 'Withdrawal limit not reached', body, primaryText: firstCard ? 'Buy your first card' : 'Ok', secondaryText: firstCard ? 'Later' : '', onPrimary: () => { closeFlowSheet(); if (firstCard) safeNavigate('shop', 'withdrawal-limit'); }, variant: 'center' });
+    }
+
     window.startWithdrawWizard = function () {
         if (!state.isLoggedIn) {
             showToast('warning', 'Please log in to request a withdrawal.');
             return safeNavigate('login', 'withdraw-auth');
         }
+        if (Number(state.user?.redeemedBalance || 0) < minWithdrawal()) return showWithdrawalLimitNotice();
         const lifetimeRedeemedCards = getLifetimeRedeemedCards();
         const requiredCards = requiredCardsForWithdrawal();
         if (lifetimeRedeemedCards < requiredCards) {
@@ -1248,8 +1270,8 @@
                     <p class="text-secondary text-sm" style="margin:0 0 4px;">Step 1 of 3 · Amount</p>
                     <div class="input-group">
                         <label for="wizAmount">Amount</label>
-                        <div class="input-wrap"><span class="prefix">₵</span><input type="number" id="wizAmount" placeholder="0.00" min="${MIN_WITHDRAWAL}" step="0.01" value="${withdrawWizard.amount || ''}" oninput="validateWizardAmount()" /></div>
-                        <div class="help-text">Available: GHS ${money(state.user.redeemedBalance)} · Minimum GHS ${money(MIN_WITHDRAWAL)}.</div>
+                        <div class="input-wrap"><span class="prefix">₵</span><input type="number" id="wizAmount" placeholder="0.00" min="${minWithdrawal()}" step="0.01" value="${withdrawWizard.amount || ''}" oninput="validateWizardAmount()" /></div>
+                        <div class="help-text">Available: GHS ${money(state.user.redeemedBalance)} · Minimum GHS ${money(minWithdrawal())}.</div>
                     </div>
                     <div id="wizAmountResult"></div>
                 </div>
@@ -1271,10 +1293,10 @@
         const result = byId('wizAmountResult');
         const primary = byId('flowPrimaryBtn');
         let message = '';
-        if (amount > 0 && amount < MIN_WITHDRAWAL) message = `Minimum withdrawal is GHS ${money(MIN_WITHDRAWAL)}.`;
+        if (amount > 0 && amount < minWithdrawal()) message = `Minimum withdrawal is GHS ${money(minWithdrawal())}.`;
         else if (amount > state.user.redeemedBalance) message = 'Withdrawal amount exceeds redeemed balance.';
         if (result) { result.innerHTML = message ? `<div class="inline-alert error">${escape(message)}</div>` : ''; }
-        const valid = Number.isFinite(amount) && amount >= MIN_WITHDRAWAL && amount <= state.user.redeemedBalance;
+        const valid = Number.isFinite(amount) && amount >= minWithdrawal() && amount <= state.user.redeemedBalance;
         if (primary) primary.disabled = !valid;
         return valid;
     };
@@ -1403,7 +1425,9 @@
             if (pendingKyc) showKycOptions(data.withdrawal.reference);
             else showToast('success', 'Withdrawal request submitted for admin approval.');
         } catch (e) {
-            if (/Redeem \d+ more card/i.test(e.message)) {
+            if (/Withdrawals start at GHS/i.test(e.message)) {
+                showWithdrawalLimitNotice();
+            } else if (/Redeem \d+ more card/i.test(e.message)) {
                 openFlowSheet({ title: 'Withdrawal not available yet', body: `<p class="text-secondary">To request a withdrawal, please redeem at least ${requiredCardsForWithdrawal()} card${requiredCardsForWithdrawal() === 1 ? '' : 's'}. ${escape(e.message)}</p>`, primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center' });
             } else showToast('error', e.message);
         } finally {

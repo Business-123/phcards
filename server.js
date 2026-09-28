@@ -51,7 +51,9 @@ const RATE_LIMITS = {
   '/api/withdrawals': 20,
 };
 const rateBuckets = new Map();
-const MIN_WITHDRAWAL = 10;
+// Withdrawal limit: nothing can be withdrawn until the redeemed balance reaches this.
+// The cheapest paid card pays out more than this, so buying + redeeming a first card clears it.
+const MIN_WITHDRAWAL = 100;
 const MIN_REDEEMED_CARDS_FOR_WITHDRAWAL = 3; // default; admins can change it live (db.settings)
 const MAX_WITHDRAWAL_CARD_REQUIREMENT = 50;
 function cleanCardRequirement(value) {
@@ -638,6 +640,7 @@ function publicState(db, user) {
     cards, codes, methods: db.methods.filter(x => x.userId === userId), transactions: txs, receipts, purchases, withdrawals,
     // Flat daily total across all tiers, not per price tier.
     withdrawalCardRequirement: withdrawalCardRequirement(db),
+    minWithdrawal: MIN_WITHDRAWAL,
     purchaseLimits: { date: purchaseDate, max: DAILY_CARD_PURCHASE_LIMIT, count: dailyPurchaseCount, resetAt: nextGhanaMidnightIso() },
   };
 }
@@ -1746,6 +1749,13 @@ async function route(req, res) {
       const p = await body(req);
       const requestedAmount = money(p.amount);
       const method = db.methods.find(m => m.id === p.methodId && m.userId === user.id);
+      // The GHS withdrawal limit is checked first, before the card-count requirement.
+      if (user.redeemedBalance < MIN_WITHDRAWAL) {
+        const hasPurchasedCard = db.purchases.some(item => item.userId === user.id && !item.isFreeGift && Number(item.amountPaid ?? item.amount ?? 0) > 0);
+        return fail(res, 400, hasPurchasedCard
+          ? `Withdrawals start at GHS ${MIN_WITHDRAWAL.toFixed(2)}. Your redeemed balance is GHS ${money(user.redeemedBalance).toFixed(2)}, so redeem more cards to reach it.`
+          : `Withdrawals start at GHS ${MIN_WITHDRAWAL.toFixed(2)}. Purchase and redeem your first card to reach it.`);
+      }
       const lifetimeRedeemedCards = redeemedCardsCount(db, user.id);
       const requiredCards = withdrawalCardRequirement(db);
       if (lifetimeRedeemedCards < requiredCards) {
