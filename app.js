@@ -752,15 +752,18 @@
         `);
     }
 
-    function purchaseSuccessModal(purchase, card) {
+    function purchaseSuccessModal(purchase, card, options = {}) {
         const title = card?.title || 'Sealed card';
+        const kicker = options.kicker || 'Purchase successful';
+        const priceLabel = options.priceLabel || ghs(purchase.amountPaid ?? purchase.amount);
+        const copy = options.copy || 'Your card is now available in your account.';
         openPurchaseModal(`
             <div class="purchase-modal-success">
                 <span class="purchase-success-mark" aria-hidden="true">✓</span>
-                <p class="purchase-modal-kicker">Purchase successful</p>
+                <p class="purchase-modal-kicker">${escape(kicker)}</p>
                 <h2>${escape(title)}</h2>
-                <p class="purchase-modal-price">${ghs(purchase.amountPaid ?? purchase.amount)}</p>
-                <p class="purchase-modal-copy">Your card is now available in your account.</p>
+                <p class="purchase-modal-price">${priceLabel}</p>
+                <p class="purchase-modal-copy">${escape(copy)}</p>
                 <div class="purchase-modal-actions">
                     <button class="btn btn-primary" id="purchaseRedeemNow" type="button">Redeem Now</button>
                     <button class="btn btn-secondary" id="purchaseLater" type="button">Later</button>
@@ -916,6 +919,50 @@
             }
         })();
         purchaseRequests.set(idempotencyKey, request);
+        return request;
+    }
+
+    // Free gifts skip payment entirely: no checkout redirect, just a direct claim
+    // against the server, which enforces the one-claim-per-account rule.
+    const giftClaimRequests = new Map();
+    window.handleClaimGift = function (cardId) {
+        if (!state.isLoggedIn) {
+            showToast('warning', 'Please log in to claim this gift.');
+            return safeNavigate('login', 'gift-claim-auth');
+        }
+        const card = state.cards.find(c => c.id === cardId);
+        if (!card || !card.isFreeGift) return showToast('error', 'This gift is unavailable.');
+        if (hasClaimedGift(card)) return showToast('info', 'You have already claimed this free gift.');
+        return completeGiftClaim(card.id);
+    };
+
+    async function completeGiftClaim(cardId) {
+        if (giftClaimRequests.has(cardId)) return giftClaimRequests.get(cardId);
+        openPurchaseModal(`
+            <div class="purchase-process" aria-label="Claiming your gift">
+                <span class="purchase-spinner" aria-hidden="true"></span>
+                <h2>Claiming your gift</h2>
+                <p>Just a moment...</p>
+            </div>
+        `);
+        const request = (async () => {
+            try {
+                const data = await api('/api/claim-gift', { method: 'POST', body: JSON.stringify({ cardId }) });
+                applyServerState(data.state, { refreshUI: false, reason: 'gift-claim' });
+                refreshMountedUI('gift-claim');
+                return purchaseSuccessModal(data.purchase, state.cards.find(card => card.id === data.purchase.cardId), {
+                    kicker: 'Gift claimed',
+                    priceLabel: 'FREE',
+                    copy: 'Your free gift card is now available in your account.',
+                });
+            } catch (e) {
+                closePurchaseModal();
+                showToast('error', e.message);
+            } finally {
+                giftClaimRequests.delete(cardId);
+            }
+        })();
+        giftClaimRequests.set(cardId, request);
         return request;
     }
 
@@ -1973,7 +2020,14 @@
     }
 
     function cardIsAvailable(card) {
+        if (card?.isFreeGift) return !hasClaimedGift(card);
         return Boolean(card && card.active !== false && Number(card.stock || 0) > 0 && !dailyPurchaseLimitReached(card));
+    }
+
+    // A free gift can only ever be claimed once per account. We know it has already
+    // been claimed once a matching purchase (flagged isFreeGift) shows up in state.
+    function hasClaimedGift(card) {
+        return (state.purchases || []).some(item => item.cardId === card?.id && item.isFreeGift);
     }
 
     function cardVisual(card) {
@@ -2036,9 +2090,6 @@
 
     function renderCardTileReal(card, context = 'grid') {
         const visual = cardVisual(card);
-        const stockAvailable = Boolean(card && card.active !== false && Number(card.stock || 0) > 0);
-        const limitReached = dailyPurchaseLimitReached(card);
-        const available = stockAvailable && !limitReached;
         const sizeClass = context === 'rail' ? 'rail-card market-card' : 'product-card market-card';
         const faceStyle = cardFaceStyle(card.category);
         const potentialRedeem = rewardRangeCardText(card);
@@ -2046,6 +2097,41 @@
             Digital: '✦', Collectible: '◇', Gaming: '◈', Crypto: '₿',
             Access: '⌁', Exclusive: '✧', Limited: '◆', Rare: '✦',
         }[card.category] || '✦';
+
+        if (card.isFreeGift) {
+            const claimed = hasClaimedGift(card);
+            const available = !claimed;
+            return `
+                <div class="${sizeClass} is-gift ${claimed ? 'is-unavailable' : ''}">
+                    <div class="market-card-top">
+                        <div class="market-art" style="${faceStyle}" onclick="${available ? `showDetail('${escape(card.id)}')` : ''}" role="button" tabindex="0" aria-label="View ${escape(card.title)}">
+                            <span class="market-art-mark" aria-hidden="true">${artMark}</span>
+                            ${claimed ? '<span class="market-art-unavailable">Already claimed</span>' : ''}
+                        </div>
+                        <span class="market-type gift"><span class="chip-dot"></span>${claimed ? 'Claimed' : 'Free Gift'}</span>
+                    </div>
+                    <div class="market-card-info">
+                        <h3>${escape(card.title)}</h3>
+                        <p>${escape(card.category)} · ${claimed ? 'Already claimed' : 'Free — one per account'}</p>
+                    </div>
+                    <div class="market-card-values">
+                        <div>
+                            <span>Card price</span>
+                            <strong class="free-price">FREE</strong>
+                        </div>
+                        <div class="redeem">
+                            <span>Potential redeem</span>
+                            <strong>${escape(potentialRedeem)}</strong>
+                        </div>
+                    </div>
+                    <button class="btn btn-success buy-btn claim-btn" onclick="handleClaimGift('${escape(card.id)}')" ${available ? '' : 'disabled'}>${available ? 'CLAIM NOW <span aria-hidden="true">→</span>' : 'CLAIMED'}</button>
+                </div>
+            `;
+        }
+
+        const stockAvailable = Boolean(card && card.active !== false && Number(card.stock || 0) > 0);
+        const limitReached = dailyPurchaseLimitReached(card);
+        const available = stockAvailable && !limitReached;
         return `
             <div class="${sizeClass} ${available ? '' : 'is-unavailable'}">
                 <div class="market-card-top">
@@ -2107,7 +2193,7 @@
         // every card goes out of stock and disappears from the shop for the rest
         // of the day, rather than just showing as disabled.
         const beforeLimitFilter = filtered.length;
-        filtered = filtered.filter(card => !dailyPurchaseLimitReached(card));
+        filtered = filtered.filter(card => card.isFreeGift || !dailyPurchaseLimitReached(card));
         const hiddenByLimit = beforeLimitFilter > 0 && filtered.length === 0;
         const sortVal = byId('sortSelect')?.value || 'price-low';
         if (sortVal === 'price-low') filtered.sort((a, b) => Number(a.price) - Number(b.price));
@@ -2146,16 +2232,62 @@
             showToast('warning', 'Please log in to view card details.');
             return safeNavigate('login', 'detail-auth');
         }
-        const limitReached = dailyPurchaseLimitReached(card);
-        const available = cardIsAvailable(card);
-        const stockAvailable = card.active !== false && Number(card.stock || 0) > 0;
         const visual = cardVisual(card);
-        const price = Number(card.actualPrice || card.priceGhs || card.price * 12);
-        const potentialRedeem = rewardRangeText(card, price);
+        const faceStyle = cardFaceStyle(card.category);
         const container = byId('detailContent');
         if (!container) return;
         safeNavigate('detail', 'card-detail');
-        const faceStyle = cardFaceStyle(card.category);
+
+        if (card.isFreeGift) {
+            const claimed = hasClaimedGift(card);
+            const available = !claimed;
+            const potentialRedeem = rewardRangeText(card, card.giftBaseValueGhs || 0);
+            container.innerHTML = `
+                <div class="card" style="background:var(--bg-card);">
+                    <div class="market-card is-gift ${available ? '' : 'is-unavailable'}" style="max-width:520px;margin:0 auto 18px;">
+                        <div class="card-face" style="${faceStyle}cursor:default;">
+                            <span class="sealed-chip gift"><span class="chip-dot"></span>${claimed ? 'Claimed' : 'Free Gift'}</span>
+                            ${claimed ? '<div class="card-unavailable-banner">Already claimed</div>' : ''}
+                            <div class="card-copy">
+                                <div class="card-series">${escape(card.series || visual.series || 'Phantom Reserve')}</div>
+                                <div class="card-title">${escape(card.title)}</div>
+                                <div class="card-sub">${escape(card.category)} · ${claimed ? 'Already claimed' : 'Free — one per account'}</div>
+                            </div>
+                            <div class="card-value-row">
+                                <div class="card-value-metric">
+                                    <span>Card price</span>
+                                    <strong class="free-price">FREE</strong>
+                                </div>
+                                <div class="card-value-metric redeem">
+                                    <span>Potential Redeem</span>
+                                    <strong>${escape(potentialRedeem)}</strong>
+                                </div>
+                            </div>
+                        </div>
+                        <button class="btn btn-success buy-btn claim-btn" onclick="handleClaimGift('${escape(card.id)}')" ${available ? '' : 'disabled'}>${available ? 'CLAIM NOW' : 'CLAIMED'}</button>
+                    </div>
+                    <div style="display:flex;gap:16px;flex-wrap:wrap;margin:12px 0 16px;">
+                        <div><span class="text-sm text-muted">Price</span><div class="text-xl font-bold">FREE</div></div>
+                        <div><span class="text-sm text-muted">You pay</span><div class="text-xl font-bold">GHS 0.00</div></div>
+                        <div><span class="text-sm text-muted">Potential redeem</span><div class="text-xl font-bold">${escape(potentialRedeem)}</div></div>
+                        <div><span class="text-sm text-muted">Availability</span><div class="text-xl font-bold ${available ? '' : 'text-error'}">${available ? 'Free to claim' : 'Already claimed'}</div></div>
+                    </div>
+                    <p class="text-sm text-secondary" style="margin:12px 0;">${escape(card.description)}</p>
+                    <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;">
+                        <button class="btn btn-secondary" style="flex:1;" onclick="goBack('shop')">← Back</button>
+                        ${available ? `<button class="btn btn-success" style="flex:1;" onclick="handleClaimGift('${escape(card.id)}')">CLAIM NOW</button>` : ''}
+                    </div>
+                </div>
+            `;
+            if (typeof lucide !== 'undefined') lucide.createIcons();
+            return;
+        }
+
+        const limitReached = dailyPurchaseLimitReached(card);
+        const available = cardIsAvailable(card);
+        const stockAvailable = card.active !== false && Number(card.stock || 0) > 0;
+        const price = Number(card.actualPrice || card.priceGhs || card.price * 12);
+        const potentialRedeem = rewardRangeText(card, price);
         container.innerHTML = `
             <div class="card" style="background:var(--bg-card);">
                 <div class="market-card ${available ? '' : 'is-unavailable'}" style="max-width:520px;margin:0 auto 18px;">

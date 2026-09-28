@@ -46,6 +46,7 @@ const RATE_LIMITS = {
   '/api/auth/password': 10,
   '/api/auth/pin': 10,
   '/api/purchases': 30,
+  '/api/claim-gift': 20,
   '/api/redemptions': 30,
   '/api/withdrawals': 20,
 };
@@ -235,7 +236,9 @@ function makeCards() {
     const stock = i % 17 === 0 ? 0 : 8 + Math.floor(random() * 42);
     const band = rewardBandFor(priceGhs);
     const rewardRange = rewardRangeForPrice(priceGhs);
-    return { id: `CARD-${String(i + 1).padStart(4, '0')}`, seed, serial, title: `${category} ${tier} ${serial.slice(0, 4)}`, category, price: priceGhs, priceGhs, displayPriceUsd: usdPrice, stock, active: stock > 0, series: `${category.slice(0, 3).toUpperCase()}-${serial.slice(0, 5)}`, edition: serial.slice(5), rgb: visuals[i % visuals.length], rewardBand: band.key, rewardMinRate: band.minRate, rewardMaxRate: band.maxRate, rewardMinAmount: rewardRange.min, rewardMaxAmount: rewardRange.max, description: `${category} ${tier.toLowerCase()} sealed card with a ${band.label.toLowerCase()} reward band.` };
+    const gift = i === 0 ? { isFreeGift: true, giftBaseValueGhs: priceGhs, description: 'A free welcome gift — claim it at no cost. Each account may claim it once.' } : {};
+    const card = { id: `CARD-${String(i + 1).padStart(4, '0')}`, seed, serial, title: `${category} ${tier} ${serial.slice(0, 4)}`, category, price: priceGhs, priceGhs, displayPriceUsd: usdPrice, stock, active: stock > 0, series: `${category.slice(0, 3).toUpperCase()}-${serial.slice(0, 5)}`, edition: serial.slice(5), rgb: visuals[i % visuals.length], rewardBand: band.key, rewardMinRate: band.minRate, rewardMaxRate: band.maxRate, rewardMinAmount: rewardRange.min, rewardMaxAmount: rewardRange.max, description: `${category} ${tier.toLowerCase()} sealed card with a ${band.label.toLowerCase()} reward band.` };
+    return i === 0 ? { ...card, ...gift, price: 0, priceGhs: 0, displayPriceUsd: 0, stock: 999999, active: true } : card;
   });
 }
 function blankDb() { return { version: 5, cards: makeCards(), users: [], sessions: [], adminSessions: [], adminAuditLogs: [], deposits: [], cardPayments: [], purchases: [], dailyPurchaseCounts: [], codes: [], methods: [], withdrawals: [], transactions: [], receipts: [], passwordResets: [], kycBypassPayments: [] }; }
@@ -244,6 +247,31 @@ function syncCardCatalog(cards) {
   const generatedMap = new Map(generated.map(card => [card.id, card]));
   return (Array.isArray(cards) && cards.length ? cards : generated).map(card => {
     const template = generatedMap.get(card.id) || card;
+    // A free-gift card is never priced or restocked like a normal card: it always costs
+    // nothing and is always available to claim, no matter what the generated template or
+    // any stray stock number on disk says. Its reward band is still derived from a fixed
+    // "value" (giftBaseValueGhs) so the potential-redeem display stays meaningful.
+    if (card.isFreeGift || card.id === 'CARD-0001') {
+      const giftBaseValueGhs = money(card.giftBaseValueGhs || (card.isFreeGift ? 0 : (card.priceGhs || card.price)) || template.giftBaseValueGhs || 45);
+      const band = rewardBandFor(giftBaseValueGhs);
+      const rewardRange = rewardRangeForPrice(giftBaseValueGhs);
+      return {
+        ...card,
+        isFreeGift: true,
+        description: card.isFreeGift ? card.description : template.description,
+        giftBaseValueGhs,
+        price: 0,
+        priceGhs: 0,
+        displayPriceUsd: 0,
+        stock: Number.isFinite(Number(card.stock)) && Number(card.stock) > 0 ? Math.max(1, Math.trunc(Number(card.stock))) : 999999,
+        active: true,
+        rewardBand: band.key,
+        rewardMinRate: band.minRate,
+        rewardMaxRate: band.maxRate,
+        rewardMinAmount: rewardRange.min,
+        rewardMaxAmount: rewardRange.max,
+      };
+    }
     // A tier with an explicit override (see PRICE_OVERRIDES_GHS) always charges the
     // overridden amount, even for a card that already exists in a live database with
     // its old price saved on disk — otherwise a price change would only ever apply to
@@ -434,7 +462,7 @@ function normalizeDb(db) {
 function rebuildDailyPurchaseCounts(db) {
   const counts = new Map();
   for (const purchase of db.purchases) {
-    if (!purchase.userId) continue;
+    if (!purchase.userId || purchase.isFreeGift) continue; // free gifts never use up the daily buy limit
     const date = ghanaCalendarDate(purchase.createdAt || Date.now());
     const key = `${purchase.userId}:${date}`;
     counts.set(key, (counts.get(key) || 0) + 1);
@@ -584,7 +612,7 @@ function publicState(db, user) {
   // hides any card priced below the lowest official tier (e.g. a stray $3 card created by
   // a past manual edit) without deleting the record, so purchase/redemption history for it
   // stays intact.
-  const cards = db.cards.filter(c => Number(c.displayPriceUsd) >= 4).map(publicCard);
+  const cards = db.cards.filter(c => Number(c.displayPriceUsd) >= 4 || c.isFreeGift).map(publicCard);
   const codes = db.codes.filter(x => x.userId === userId).map(x => publicCode(x, cardMap.get(x.cardId)));
   const txs = db.transactions.filter(x => x.userId === userId).map(publicTransaction).sort((a,b) => b.createdAt.localeCompare(a.createdAt));
   const receipts = db.receipts.filter(x => x.userId === userId).map(publicReceipt).sort((a,b) => b.createdAt.localeCompare(a.createdAt));
@@ -1200,7 +1228,7 @@ async function handlePurchaseRequest(req, res) {
     }
 
     const card = db.cards.find(c => c.id === p.cardId && c.active);
-    if (!card || card.stock < 1) { fail(res, 404, 'This card is unavailable.'); return { done: true }; }
+    if (!card || card.stock < 1 || card.isFreeGift) { fail(res, 404, 'This card is unavailable.'); return { done: true }; }
     const purchaseDate = ghanaCalendarDate();
     const priceKey = purchasePriceKey(card);
     const dailyRecord = db.dailyPurchaseCounts.find(item => item.userId === user.id && item.purchaseDate === purchaseDate);
@@ -1255,6 +1283,42 @@ async function handlePurchaseRequest(req, res) {
     });
     return fail(res, 502, `Payment initialization failed: ${error.message}`);
   }
+}
+// Free gifts skip the payment hub entirely: no charge, no card payment session.
+// Each user may claim a given gift card exactly once, tracked by looking for an
+// existing purchase of that card by that user with isFreeGift set.
+async function handleClaimGiftRequest(req, res) {
+  const p = await body(req);
+  await withPurchaseMutation(async () => {
+    const db = load();
+    const user = requireUser(req, res, db);
+    if (!user) return;
+    const card = db.cards.find(item => item.id === p.cardId && item.isFreeGift);
+    if (!card) { fail(res, 404, 'This free gift is not available.'); return; }
+    const alreadyClaimed = db.purchases.some(item => item.userId === user.id && item.cardId === card.id && item.isFreeGift);
+    if (alreadyClaimed) { fail(res, 409, 'You have already claimed this free gift.'); return; }
+    const createdAt = now();
+    const orderId = uniqueReference(db, 'ORD');
+    const purchaseReference = uniqueReference(db, 'GIFT');
+    const code = uniqueCode(db);
+    const reward = rewardAllocationForPrice(card.giftBaseValueGhs || 0);
+    const purchase = {
+      id: uid('order'), orderId, reference: purchaseReference, userId: user.id, cardId: card.id,
+      idempotencyKey: `gift_${user.id}_${card.id}`, amount: 0, amountPaid: 0,
+      rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier,
+      paymentReference: null, isFreeGift: true, status: 'sealed', createdAt,
+    };
+    db.purchases.push(purchase);
+    db.codes.push({
+      id: uid('code'), code, userId: user.id, cardId: card.id, orderId, purchaseId: purchase.id,
+      amount: reward.rewardAmount, purchaseAmount: 0, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier,
+      status: 'unused', createdAt, redeemedAt: null, redemptionReference: null,
+    });
+    const related = { cardId: card.id, orderId, code, purchaseAmount: 0, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, provider: 'free_gift', isFreeGift: true };
+    receipt(db, { userId: user.id, type: 'purchase', amount: 0, account: 'external', reference: purchaseReference, related });
+    save(db);
+    json(res, 201, { state: publicState(db, user), purchase: publicPurchase(purchase) });
+  });
 }
 async function route(req, res) {
   const url = new URL(req.url, appBaseUrlForRoute(req)); const { pathname } = url;
@@ -1579,6 +1643,7 @@ async function route(req, res) {
       return json(res, 200, { ok: true });
     }
     if (req.method === 'POST' && pathname === '/api/purchases') return handlePurchaseRequest(req, res);
+    if (req.method === 'POST' && pathname === '/api/claim-gift') return handleClaimGiftRequest(req, res);
     const user = requireUser(req, res, db); if (!user) return;
     if (req.method === 'GET' && pathname === '/api/state') return json(res, 200, publicState(db, user));
     if (req.method === 'POST' && pathname === '/api/kyc/submissions') {

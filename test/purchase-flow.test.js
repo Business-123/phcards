@@ -7,7 +7,7 @@ test('tapping buy opens a checkout for the exact card price and one payment yiel
   const owner = await site.signup('Owner One', '0241234567');
   assert.equal(owner.status, 201);
   const state = await site.request('/api/state', {}, owner.cookie);
-  const card = state.data.cards.find(item => item.active && item.stock > 0);
+  const card = state.data.cards.find(item => !item.isFreeGift && item.active && item.stock > 0);
   assert.ok(card, 'a purchasable card is available');
 
   const key = 'purchase_test_key_000001';
@@ -70,7 +70,7 @@ test('failed, wrong-amount and abandoned payments never issue a card and never k
   const site = await createSite(t);
   const buyer = await site.signup('Payment Buyer', '0241234570');
   const state = await site.request('/api/state', {}, buyer.cookie);
-  const card = state.data.cards.find(item => item.active && item.stock > 2);
+  const card = state.data.cards.find(item => !item.isFreeGift && item.active && item.stock > 2);
   const stockOf = () => site.readDb().cards.find(item => item.id === card.id).stock;
 
   // Declined payment.
@@ -118,7 +118,7 @@ test('buying is unavailable when the payment hub is not configured or the visito
   const site = await createSite(t, { withHub: false });
   const buyer = await site.signup('No Hub Buyer', '0241234571');
   const state = await site.request('/api/state', {}, buyer.cookie);
-  const card = state.data.cards.find(item => item.active && item.stock > 0);
+  const card = state.data.cards.find(item => !item.isFreeGift && item.active && item.stock > 0);
   const unconfigured = await site.startPurchase(buyer.cookie, card.id, 'no_hub_purchase_key_1');
   assert.equal(unconfigured.status, 503);
   const signedOut = await site.startPurchase('', card.id, 'signed_out_purchase_k1');
@@ -140,7 +140,7 @@ test('a flat 3 cards per Ghana-calendar-day limit applies across all price tiers
   const owner = await site.signup('Daily Buyer', '0241234577', 'daily.buyer@gmail.com');
   assert.equal(owner.status, 201);
   const initial = await site.request('/api/state', {}, owner.cookie);
-  const candidates = initial.data.cards.filter(item => item.active && item.stock > 4);
+  const candidates = initial.data.cards.filter(item => !item.isFreeGift && item.active && item.stock > 4);
   const [cardA, cardB, cardC, cardD] = candidates;
   assert.ok(cardA && cardB && cardC && cardD, 'at least four distinct cards with enough stock are available');
   assert.equal(initial.data.purchaseLimits.max, 3, 'the daily cap is 3 cards total');

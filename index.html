@@ -6389,7 +6389,11 @@
         .market-type { position: absolute; top: 2px; right: 0; z-index: 2; display: inline-flex; align-items: center; gap: 6px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-secondary); background: var(--surface); font-size: .56rem; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; white-space: nowrap; }
         .market-type .chip-dot { width: 7px; height: 7px; margin: 0; border-radius: 50%; background: var(--accent); }
         .market-type.unavailable { color: var(--error); }
+        .market-type.gift { color: var(--success); border-color: var(--success); background: rgba(76,175,132,.1); }
+        .market-type.gift .chip-dot { background: var(--success); }
+        .sealed-chip.gift { background: var(--success); border-color: var(--success); color: #0a0a0f; }
         .market-art-unavailable { position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; color: var(--error); background: rgba(255,253,249,.8); font-size: .55rem; font-weight: 800; text-align: center; text-transform: uppercase; }
+        .market-card.is-gift .market-art-unavailable { color: var(--success); }
         .market-card-info { min-width: 0; }
         .market-card-info h3 { overflow: hidden; color: var(--text-primary); font-size: .88rem; font-weight: 800; letter-spacing: -.025em; line-height: 1.18; text-overflow: ellipsis; white-space: nowrap; }
         .market-card-info p { margin-top: 5px; overflow: hidden; color: var(--text-secondary); font-size: .61rem; font-weight: 700; letter-spacing: .055em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
@@ -6398,6 +6402,7 @@
         .market-card-values > div.redeem { align-items: flex-end; text-align: right; }
         .market-card-values span { color: var(--text-secondary); font-size: .5rem; font-weight: 800; letter-spacing: .045em; line-height: 1.1; text-transform: uppercase; }
         .market-card-values strong { color: var(--text-primary); font-size: .92rem; font-weight: 800; line-height: 1.1; white-space: nowrap; }
+        strong.free-price { color: var(--success) !important; }
         .market-card-values .redeem strong { color: #C9890E; font-size: clamp(.52rem, 2.35vw, .62rem); line-height: 1.1; letter-spacing: -.025em; white-space: nowrap; overflow: visible; }
         .shop-card-grid .market-card .buy-btn { width: 100%; min-height: 36px; padding: 9px 8px; border-radius: 10px; font-size: .63rem; font-weight: 800; letter-spacing: .015em; }
         .shop-card-grid .market-card .buy-btn span { margin-left: 5px; font-size: .9rem; }

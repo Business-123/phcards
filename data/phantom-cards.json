@@ -7,11 +7,11 @@
       "serial": "RTK83F6H",
       "title": "Digital Founders RTK8",
       "category": "Digital",
-      "price": 45,
-      "priceGhs": 45,
-      "displayPriceUsd": 4,
-      "stock": 0,
-      "active": false,
+      "price": 0,
+      "priceGhs": 0,
+      "displayPriceUsd": 0,
+      "stock": 999999,
+      "active": true,
       "series": "DIG-RTK83",
       "edition": "F6H",
       "rgb": "205,220,235",
@@ -20,7 +20,9 @@
       "rewardMaxRate": 4.42,
       "rewardMinAmount": 158.4,
       "rewardMaxAmount": 198.9,
-      "description": "Digital founders sealed card with a $4-$5 band reward band."
+      "description": "A free welcome gift \u2014 claim it at no cost. Each account may claim it once.",
+      "isFreeGift": true,
+      "giftBaseValueGhs": 45
     },
     {
       "id": "CARD-0002",

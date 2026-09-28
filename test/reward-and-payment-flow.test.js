@@ -9,7 +9,7 @@ test('future card redemptions use the backend x3.52-x4.42 reward range', { timeo
   const state = await site.request('/api/state', {}, signup.cookie);
   const cards = [];
   for (const card of state.data.cards) {
-    if (card.active && card.stock > 0 && !cards.some(item => item.displayPriceUsd === card.displayPriceUsd)) cards.push(card);
+    if (!card.isFreeGift && card.active && card.stock > 0 && !cards.some(item => item.displayPriceUsd === card.displayPriceUsd)) cards.push(card);
     if (cards.length === 3) break;
   }
   assert.equal(cards.length, 3);
@@ -40,7 +40,7 @@ test('card checkout uses each user\'s own account email and every payment gets i
     assert.ok(result.data.user.email.endsWith('@gmail.com'));
   }
   const state = await site.request('/api/state', {}, first.cookie);
-  const [cardA, cardB] = state.data.cards.filter(card => card.active && card.stock > 2);
+  const [cardA, cardB] = state.data.cards.filter(card => !card.isFreeGift && card.active && card.stock > 2);
 
   const firstPayment = await site.startPurchase(first.cookie, cardA.id, 'payment_test_key_000001');
   const secondPayment = await site.startPurchase(first.cookie, cardB.id, 'payment_test_key_000002');
