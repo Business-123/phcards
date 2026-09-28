@@ -197,3 +197,11 @@ td small { display: block; margin-top: 4px; color: var(--faint); font-size: 9px;
 @media (max-width: 1050px) { .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dashboard-grid, .split-grid { grid-template-columns: 1fr; } }
 @media (max-width: 760px) { .sidebar { transform: translateX(-100%); transition: transform .2s ease; } .sidebar.open { transform: translateX(0); } .main-content { width: 100%; margin-left: 0; } .topbar { padding: 17px 18px; } .mobile-menu { display: grid; } .topbar-actions .system-pill { display: none; } .page-content { padding: 22px 16px 45px; } .page-heading { align-items: start; flex-direction: column; } .toolbar { align-items: stretch; flex-direction: column; } .toolbar .search { max-width: none; } .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .detail-drawer { padding: 29px 20px; } }
 @media (max-width: 480px) { .metric-grid { grid-template-columns: 1fr 1fr; gap: 8px; } .metric-card { padding: 13px; min-height: 102px; } .metric-value { margin-top: 13px; font-size: 21px; } .metric-top { font-size: 10px; } .metric-icon { width: 24px; height: 24px; } .settings-grid { grid-template-columns: 1fr; } }
+
+.card-req { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.card-req-btn { width: 40px; height: 40px; border: 1px solid var(--border); border-radius: 10px; background: transparent; color: var(--text, inherit); font-size: 20px; line-height: 1; cursor: pointer; }
+.card-req-btn:hover { border-color: var(--gold); color: var(--gold); }
+.card-req-input { width: 84px; height: 40px; border: 1px solid var(--border); border-radius: 10px; background: transparent; color: inherit; font-size: 18px; font-weight: 700; text-align: center; }
+.card-req-input:focus { outline: 2px solid var(--gold); outline-offset: 1px; }
+.btn-save-req { height: 40px; padding: 0 20px; border: 0; border-radius: 10px; background: var(--gold); color: #0a0a0f; font-weight: 700; cursor: pointer; }
+.btn-save-req:disabled { opacity: .4; cursor: not-allowed; }

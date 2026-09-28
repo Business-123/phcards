@@ -18,11 +18,11 @@
       "rewardBand": "band-b",
       "rewardMinRate": 3.52,
       "rewardMaxRate": 4.42,
-      "rewardMinAmount": 158.4,
-      "rewardMaxAmount": 198.9,
+      "rewardMinAmount": 63.36,
+      "rewardMaxAmount": 79.56,
       "description": "A free welcome gift \u2014 claim it at no cost. Each account may claim it once.",
       "isFreeGift": true,
-      "giftBaseValueGhs": 45
+      "giftBaseValueGhs": 18
     },
     {
       "id": "CARD-0002",

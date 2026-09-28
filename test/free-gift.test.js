@@ -28,7 +28,7 @@ test('free gift card costs nothing, needs no payment, and can be claimed only on
   let db = site.readDb();
   assert.equal(db.purchases.length, 1);
   assert.equal(db.codes.length, 1);
-  assert.ok(db.codes[0].rewardAmount > 0, 'the gift still carries a real reward');
+  assert.ok(db.codes[0].rewardAmount >= 63.36 && db.codes[0].rewardAmount <= 79.56, 'the gift is worth a $1.50 card: 18 GHS x 3.52-4.42');
   assert.equal(db.transactions.filter(tx => tx.reason === 'Card purchase').length, 0, 'no money movement is recorded');
   assert.equal(db.dailyPurchaseCounts.length, 0, 'a free gift does not use up the daily buy limit');
 

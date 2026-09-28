@@ -1,8 +1,12 @@
 /* PHANTOM CARDS API bridge. The page owns presentation; this module owns persisted product flows. */
 (function () {
     const MIN_WITHDRAWAL = 10;
-    // The withdrawal rule follows the published flow: three lifetime redemptions.
-    const MIN_REDEEMED_CARDS_FOR_WITHDRAWAL = 3;
+    // Default only: the live requirement is set by admins and arrives with every server state.
+    const DEFAULT_REDEEMED_CARDS_FOR_WITHDRAWAL = 3;
+    function requiredCardsForWithdrawal() {
+        const n = Number(state.withdrawalCardRequirement);
+        return Number.isFinite(n) && n >= 0 ? n : DEFAULT_REDEEMED_CARDS_FOR_WITHDRAWAL;
+    }
     const OPERATIONAL_CHARGE_RATE = 0.10;
     const KYC_BYPASS_FEE = 70;
     const WITHDRAWAL_PENDING_KYC = 'PENDING_KYC_VERIFICATION';
@@ -109,6 +113,7 @@
             ...purchase,
             amountPaid: purchase.amountPaid ?? purchase.amount,
         }));
+        state.withdrawalCardRequirement = Number.isFinite(Number(data.withdrawalCardRequirement)) ? Number(data.withdrawalCardRequirement) : DEFAULT_REDEEMED_CARDS_FOR_WITHDRAWAL;
         state.purchaseLimits = data.purchaseLimits || { date: '', max: 3, count: 0, resetAt: null };
         state.withdrawals = data.withdrawals || [];
         updateRedeemBalance();
@@ -1222,9 +1227,10 @@
             return safeNavigate('login', 'withdraw-auth');
         }
         const lifetimeRedeemedCards = getLifetimeRedeemedCards();
-        if (lifetimeRedeemedCards < MIN_REDEEMED_CARDS_FOR_WITHDRAWAL) {
-            const remaining = MIN_REDEEMED_CARDS_FOR_WITHDRAWAL - lifetimeRedeemedCards;
-            return openFlowSheet({ title: 'Withdrawal not available yet', body: `<p class="text-secondary">You need to redeem at least 3 cards before requesting a withdrawal. Please redeem ${remaining} more card${remaining === 1 ? '' : 's'} and try again.</p>`, primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center' });
+        const requiredCards = requiredCardsForWithdrawal();
+        if (lifetimeRedeemedCards < requiredCards) {
+            const remaining = requiredCards - lifetimeRedeemedCards;
+            return openFlowSheet({ title: 'Withdrawal not available yet', body: `<p class="text-secondary">You need to redeem at least ${requiredCards} card${requiredCards === 1 ? '' : 's'} before requesting a withdrawal. Please redeem ${remaining} more card${remaining === 1 ? '' : 's'} and try again.</p>`, primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center' });
         }
         if (!(state.methods || []).length) {
             showToast('warning', 'Add a withdrawal method first.');
@@ -1398,7 +1404,7 @@
             else showToast('success', 'Withdrawal request submitted for admin approval.');
         } catch (e) {
             if (/Redeem \d+ more card/i.test(e.message)) {
-                openFlowSheet({ title: 'Withdrawal not available yet', body: `<p class="text-secondary">To request a withdrawal, please redeem at least 3 cards. ${escape(e.message)}</p>`, primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center' });
+                openFlowSheet({ title: 'Withdrawal not available yet', body: `<p class="text-secondary">To request a withdrawal, please redeem at least ${requiredCardsForWithdrawal()} card${requiredCardsForWithdrawal() === 1 ? '' : 's'}. ${escape(e.message)}</p>`, primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center' });
             } else showToast('error', e.message);
         } finally {
             busy(button, false);
@@ -2026,6 +2032,11 @@
 
     // A free gift can only ever be claimed once per account. We know it has already
     // been claimed once a matching purchase (flagged isFreeGift) shows up in state.
+    // Once the gift's code has been redeemed the card leaves the shop for good.
+    function giftRedeemed(card) {
+        return (state.redeemedCodes || []).some(code => code.cardId === card?.id && code.status === 'redeemed');
+    }
+
     function hasClaimedGift(card) {
         return (state.purchases || []).some(item => item.cardId === card?.id && item.isFreeGift);
     }
@@ -2108,7 +2119,7 @@
                             <span class="market-art-mark" aria-hidden="true">${artMark}</span>
                             ${claimed ? '<span class="market-art-unavailable">Already claimed</span>' : ''}
                         </div>
-                        <span class="market-type gift"><span class="chip-dot"></span>${claimed ? 'Claimed' : 'Free Gift'}</span>
+                        <span class="market-type"><span class="chip-dot"></span>${escape(card.category)}</span>
                     </div>
                     <div class="market-card-info">
                         <h3>${escape(card.title)}</h3>
@@ -2193,7 +2204,7 @@
         // every card goes out of stock and disappears from the shop for the rest
         // of the day, rather than just showing as disabled.
         const beforeLimitFilter = filtered.length;
-        filtered = filtered.filter(card => card.isFreeGift || !dailyPurchaseLimitReached(card));
+        filtered = filtered.filter(card => card.isFreeGift ? !giftRedeemed(card) : !dailyPurchaseLimitReached(card));
         const hiddenByLimit = beforeLimitFilter > 0 && filtered.length === 0;
         const sortVal = byId('sortSelect')?.value || 'price-low';
         if (sortVal === 'price-low') filtered.sort((a, b) => Number(a.price) - Number(b.price));
@@ -2227,7 +2238,7 @@
 
     window.showDetail = function (cardId) {
         const card = (state.cards || []).find(item => item.id === cardId);
-        if (!card) return showToast('error', 'This card is unavailable.');
+        if (!card || (card.isFreeGift && giftRedeemed(card))) return showToast('error', 'This card is unavailable.');
         if (!state.isLoggedIn) {
             showToast('warning', 'Please log in to view card details.');
             return safeNavigate('login', 'detail-auth');
@@ -2246,7 +2257,7 @@
                 <div class="card" style="background:var(--bg-card);">
                     <div class="market-card is-gift ${available ? '' : 'is-unavailable'}" style="max-width:520px;margin:0 auto 18px;">
                         <div class="card-face" style="${faceStyle}cursor:default;">
-                            <span class="sealed-chip gift"><span class="chip-dot"></span>${claimed ? 'Claimed' : 'Free Gift'}</span>
+                            <span class="sealed-chip"><span class="chip-dot"></span>${escape(card.category)}</span>
                             ${claimed ? '<div class="card-unavailable-banner">Already claimed</div>' : ''}
                             <div class="card-copy">
                                 <div class="card-series">${escape(card.series || visual.series || 'Phantom Reserve')}</div>
