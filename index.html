@@ -6329,6 +6329,25 @@
            ================================================================ */
         .app-header { height: 74px; padding: 0 20px; }
         .app-header .header-actions { gap: 8px; }
+        .app-header .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+        .app-header .logo { white-space: nowrap; }
+        .header-wallet {
+            display: inline-flex; align-items: center; gap: 6px;
+            height: 32px; padding: 0 11px 0 8px; border-radius: 999px;
+            background: #FFF5D9; border: 1px solid #E7C46E; color: var(--text-primary);
+            font: inherit; font-size: .74rem; font-weight: 800; letter-spacing: -.01em;
+            cursor: pointer; white-space: nowrap; transition: var(--transition);
+        }
+        .header-wallet:hover { background: #F7EAC9; }
+        .header-wallet:active { transform: scale(.97); }
+        .header-wallet svg { width: 15px; height: 15px; stroke-width: 2.2; color: #9A6910; flex: none; }
+        .header-wallet .hw-amount { font-variant-numeric: tabular-nums; }
+        @media (max-width: 380px) {
+            .app-header { padding: 0 14px; }
+            .app-header .header-left { gap: 7px; }
+            .app-header .logo { font-size: .86rem; gap: 5px; }
+            .header-wallet { padding: 0 9px 0 7px; font-size: .68rem; gap: 4px; }
+        }
         @keyframes refreshSpin { to { transform: rotate(360deg); } }
 
         /* ================================================================
@@ -6574,8 +6593,14 @@
 
     <!-- ========== APP HEADER ========== -->
     <header class="app-header" id="appHeader">
-        <div class="logo">
-            <span>✦</span> PHANTOM <span>CARDS</span>
+        <div class="header-left">
+            <div class="logo">
+                <span>✦</span> PHANTOM <span>CARDS</span>
+            </div>
+            <button class="header-wallet" id="headerWallet" type="button" onclick="navigateTo('wallet')" aria-label="Open wallet">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-2"/><path d="M21 12h-5a2 2 0 0 0 0 4h5z"/></svg>
+                <span class="hw-amount" id="headerWalletAmount">GHS 0.00</span>
+            </button>
         </div>
         <div class="header-actions">
             <button class="avatar" id="avatarDisplay" type="button" onclick="toggleDrawer()" aria-label="Open menu">JD</button>
@@ -8759,6 +8784,12 @@
             if (dashRedeemedEl) dashRedeemedEl.textContent = redeemedBal.toFixed(2);
             const dashUsdEl = document.getElementById('dashWalletUsd');
             if (dashUsdEl) dashUsdEl.textContent = (walletBal / 12).toFixed(2);
+
+            // Header wallet chip — spendable/withdrawable Redeemed Balance
+            const headerWalletAmt = document.getElementById('headerWalletAmount');
+            if (headerWalletAmt) headerWalletAmt.textContent = 'GHS ' + redeemedBal.toFixed(2);
+            const headerWalletBtn = document.getElementById('headerWallet');
+            if (headerWalletBtn) headerWalletBtn.setAttribute('aria-label', `Open wallet, balance GHS ${redeemedBal.toFixed(2)}`);
 
             // Withdraw page — only redeemed funds are ever withdrawable
             const withdrawEl = document.getElementById('withdrawBalance');
