@@ -28,7 +28,7 @@ async function waitForHealth(baseUrl) {
   throw new Error('Test server did not start.');
 }
 
-test('a confirmed GHS 70 KYC bypass auto-approves only its pending withdrawal', { timeout: 15000 }, async t => {
+test('a confirmed GHS 70 KYC bypass leaves its withdrawal pending for admin approval', { timeout: 15000 }, async t => {
   const port = await freePort();
   const hubPort = await freePort();
   const dataFile = path.join(os.tmpdir(), `phantom-withdrawal-test-${process.pid}-${Date.now()}.json`);
@@ -139,7 +139,7 @@ test('a confirmed GHS 70 KYC bypass auto-approves only its pending withdrawal', 
   const state = await request('/api/state', {}, signup.cookie);
   const completedWithdrawal = state.data.withdrawals.find(item => !item.isRefund);
   const withdrawal = completedWithdrawal;
-  assert.equal(completedWithdrawal.status, 'approved');
+  assert.equal(completedWithdrawal.status, 'pending', 'paying the KYC fee leaves the withdrawal pending until an admin approves it');
   assert.equal(completedWithdrawal.operationalCharge, 10);
   assert.equal(completedWithdrawal.actualAmount, 90);
   assert.equal(completedWithdrawal.kycBypassUsed, true);

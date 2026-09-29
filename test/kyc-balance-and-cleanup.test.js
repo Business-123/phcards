@@ -74,7 +74,7 @@ test('approved users can pay the KYC fee from redeemed balance; others cannot', 
   const paid = await withdraw(100);
   assert.equal(paid.response.status, 201);
   assert.equal(paid.data.paidWithBalance, true);
-  assert.equal(paid.data.withdrawal.status, 'approved');
+  assert.equal(paid.data.withdrawal.status, 'pending');
   assert.equal(paid.data.state.user.redeemedBalance, 130, '300 - 100 withdrawal - 70 KYC fee');
   assert.equal(paid.data.state.user.kycStatus, 'VERIFIED');
 

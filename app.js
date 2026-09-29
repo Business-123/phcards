@@ -1409,19 +1409,13 @@
                 return;
             }
             if (data.paidWithBalance) {
-                // Approved user paid the one-time KYC fee from redeemed balance: the withdrawal is already approved.
+                // Approved user paid the one-time KYC fee from redeemed balance: the withdrawal is pending admin approval.
                 applyServerState(data.state, { refreshUI: false, reason: 'withdrawal-kyc-balance' });
                 closeFlowSheet();
                 safeNavigate('withdraw', 'withdrawal-complete');
                 refreshMountedUI('withdrawal-after-navigation');
-                const result = byId('withdrawResult');
-                if (result) {
-                    result.dataset.locked = 'success';
-                    result.style.display = 'block';
-                    result.innerHTML = `<div class="inline-alert success">KYC fee paid from your redeemed balance and your withdrawal is approved. Reference ${escape(data.withdrawal.reference)}.</div>${formatReceipt(data.receipt)}`;
-                }
                 withdrawWizard = { amount: 0, methodId: '', pin: '' };
-                showToast('success', `${ghs(KYC_BYPASS_FEE)} KYC fee paid from your redeemed balance. Withdrawal approved.`);
+                showToast('success', `${ghs(KYC_BYPASS_FEE)} KYC fee paid from your redeemed balance. Withdrawal is pending admin approval.`);
                 return;
             }
             applyServerState(data.state, { refreshUI: false, reason: 'withdrawal' });
@@ -1429,12 +1423,6 @@
             safeNavigate('withdraw', 'withdrawal-complete');
             refreshMountedUI('withdrawal-after-navigation');
             const pendingKyc = data.withdrawal.status === WITHDRAWAL_PENDING_KYC;
-            const result = byId('withdrawResult');
-            if (result && !pendingKyc) {
-                result.dataset.locked = 'success';
-                result.style.display = 'block';
-                result.innerHTML = `<div class="inline-alert success">Withdrawal request submitted for admin approval. Reference ${escape(data.withdrawal.reference)}.</div>${formatReceipt(data.receipt)}`;
-            }
             withdrawWizard = { amount: 0, methodId: '', pin: '' };
             if (pendingKyc) showKycOptions(data.withdrawal.reference);
             else showToast('success', 'Withdrawal request submitted for admin approval.');
@@ -1534,9 +1522,9 @@
             history.replaceState({}, '', location.pathname || '/');
             safeNavigate('withdraw', 'kyc-bypass-verified');
             refreshMountedUI('kyc-bypass-after-verification');
-            showToast('success', `KYC bypass confirmed. Your ${ghs(KYC_BYPASS_FEE)} KYC Fee Refund is recorded in Withdrawal History.`);
+            showToast('success', `KYC fee confirmed. Your withdrawal is pending admin approval.`);
             openFlowSheet({
-                title: 'Withdrawal approved',
+                title: 'KYC fee paid',
                 body: formatReceipt(data.refundReceipt || data.receipt),
                 primaryText: 'View withdrawals',
                 onPrimary: () => {

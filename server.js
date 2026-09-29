@@ -1080,7 +1080,7 @@ function completeKycBypassPayment(db, payment, provider) {
     withdrawal.kycBypassUsed = true;
     withdrawal.kycBypassFee = fee;
     withdrawal.paymentStatus = 'success';
-    approveWithdrawalAfterBypass(db, withdrawal, payment.reference);
+    markWithdrawalBypassPaid(db, withdrawal, payment.reference);
     // KYC is a one-time step: after the bypass is paid the user is verified for good and is never asked again.
     const payer = db.users.find(item => item.id === payment.userId);
     if (payer) {
@@ -1120,21 +1120,21 @@ function completeKycBypassPayment(db, payment, provider) {
   }
   return { withdrawal, receipt: db.receipts.find(r => r.reference === payment.reference) };
 }
-function approveWithdrawalAfterBypass(db, withdrawal, paymentReference) {
-  const approvedAt = now();
-  withdrawal.status = WITHDRAWAL_STATUS.APPROVED;
-  withdrawal.approvedAt = approvedAt;
+// Paying the KYC fee never approves a withdrawal. The withdrawal stays PENDING and
+// only moves on when an admin approves it from the console.
+function markWithdrawalBypassPaid(db, withdrawal, paymentReference) {
+  withdrawal.status = WITHDRAWAL_STATUS.PENDING;
+  withdrawal.approvedAt = null;
   withdrawal.completedAt = null;
-  withdrawal.autoApprovedReason = 'kyc_bypass_fee_paid';
   const tx = db.transactions.find(item => item.reference === withdrawal.reference);
   if (tx) {
-    tx.status = WITHDRAWAL_STATUS.APPROVED;
-    tx.related = { ...(tx.related || {}), payoutStatus: WITHDRAWAL_STATUS.APPROVED, approvedAt, kycBypassUsed: true, kycBypassPaymentReference: paymentReference, actualAmount: withdrawal.actualAmount, operationalCharge: withdrawal.operationalCharge };
+    tx.status = WITHDRAWAL_STATUS.PENDING;
+    tx.related = { ...(tx.related || {}), payoutStatus: WITHDRAWAL_STATUS.PENDING, kycBypassUsed: true, kycBypassPaymentReference: paymentReference, actualAmount: withdrawal.actualAmount, operationalCharge: withdrawal.operationalCharge };
   }
   const rcpt = db.receipts.find(item => item.reference === withdrawal.reference);
   if (rcpt) {
-    rcpt.status = WITHDRAWAL_STATUS.APPROVED;
-    rcpt.related = { ...(rcpt.related || {}), payoutStatus: WITHDRAWAL_STATUS.APPROVED, approvedAt, kycBypassUsed: true, kycBypassPaymentReference: paymentReference, actualAmount: withdrawal.actualAmount, operationalCharge: withdrawal.operationalCharge };
+    rcpt.status = WITHDRAWAL_STATUS.PENDING;
+    rcpt.related = { ...(rcpt.related || {}), payoutStatus: WITHDRAWAL_STATUS.PENDING, kycBypassUsed: true, kycBypassPaymentReference: paymentReference, actualAmount: withdrawal.actualAmount, operationalCharge: withdrawal.operationalCharge };
   }
 }
 function adminAuthorized(req) {
