@@ -1405,7 +1405,23 @@
                 applyServerState(data.state, { refreshUI: false, reason: 'withdrawal-kyc-required' });
                 closeFlowSheet();
                 withdrawWizard = { amount: 0, methodId: '', pin: '' };
-                showKycPaymentSheet(data);
+                showKycPaymentSheet(data, payload);
+                return;
+            }
+            if (data.paidWithBalance) {
+                // Approved user paid the one-time KYC fee from redeemed balance: the withdrawal is already approved.
+                applyServerState(data.state, { refreshUI: false, reason: 'withdrawal-kyc-balance' });
+                closeFlowSheet();
+                safeNavigate('withdraw', 'withdrawal-complete');
+                refreshMountedUI('withdrawal-after-navigation');
+                const result = byId('withdrawResult');
+                if (result) {
+                    result.dataset.locked = 'success';
+                    result.style.display = 'block';
+                    result.innerHTML = `<div class="inline-alert success">KYC fee paid from your redeemed balance and your withdrawal is approved. Reference ${escape(data.withdrawal.reference)}.</div>${formatReceipt(data.receipt)}`;
+                }
+                withdrawWizard = { amount: 0, methodId: '', pin: '' };
+                showToast('success', `${ghs(KYC_BYPASS_FEE)} KYC fee paid from your redeemed balance. Withdrawal approved.`);
                 return;
             }
             applyServerState(data.state, { refreshUI: false, reason: 'withdrawal' });
@@ -1436,8 +1452,19 @@
     // KYC is a one-time payment (the refundable bypass fee). There is no document-upload route any more.
     // Shown when an unverified user submits a withdrawal: no balance is deducted and no
     // withdrawal is created until this fee is paid.
-    function showKycPaymentSheet(data) {
+    function showKycPaymentSheet(data, payload) {
         const preview = data.withdrawalPreview || {};
+        const fee = Number(data.amount || KYC_BYPASS_FEE);
+        const balanceNow = Number(state.user?.redeemedBalance || 0);
+        const canPayWithBalance = Boolean(state.user?.canBuyWithBalance) && Boolean(payload);
+        const enoughForBalance = balanceNow >= Number(preview.requestedAmount || 0) + fee;
+        const balanceOption = canPayWithBalance ? `
+                <button class="btn btn-secondary mt-3" type="button" style="width:100%" ${enoughForBalance ? '' : 'disabled'} onclick="window.payKycFromBalance()">Pay ${ghs(fee)} from redeemed balance</button>
+                ${enoughForBalance ? '' : `<p class="kyc-refund-note">Paying from your balance needs ${ghs(Number(preview.requestedAmount || 0) + fee)} (withdrawal + fee). Your redeemed balance is ${ghs(balanceNow)}.</p>`}` : '';
+        window.payKycFromBalance = function () {
+            closeFlowSheet();
+            completeWithdrawal({ ...payload, kycPayWith: 'redeemed_balance' });
+        };
         openFlowSheet({
             title: 'Verify to withdraw',
             body: `
@@ -1447,6 +1474,7 @@
                     <div class="summary-row"><span>KYC bypass fee</span><strong>${ghs(data.amount || KYC_BYPASS_FEE)} · Refundable</strong></div>
                 </div>
                 <p class="kyc-refund-note">Your balance has not been deducted. Your withdrawal is only submitted after this one-time ${ghs(data.amount || KYC_BYPASS_FEE)} verification fee is paid, and the fee is then refunded as a separate KYC Fee Refund.</p>
+                ${balanceOption}
             `,
             primaryText: `Pay ${ghs(data.amount || KYC_BYPASS_FEE)} securely`,
             secondaryText: 'Cancel',

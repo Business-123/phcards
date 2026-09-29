@@ -478,6 +478,22 @@ function normalizeWithdrawalRecord(withdrawal) {
 function withdrawalIsHeld(status) {
   return [WITHDRAWAL_STATUS.PENDING, WITHDRAWAL_STATUS.APPROVED, WITHDRAWAL_STATUS.PROCESSING, WITHDRAWAL_STATUS.PENDING_KYC_VERIFICATION].includes(status);
 }
+// Withdrawals are no longer parked on "pending KYC": the withdrawal is only created
+// once the KYC fee is paid. Any older withdrawal still stuck in PENDING_KYC_VERIFICATION
+// is removed together with its ledger transaction and receipt. Balances are rebuilt from
+// the ledger right after this runs (see migrateMoneyLedger), so removing the held debit
+// is what gives the user their money back. Idempotent: a second run finds nothing.
+function purgePendingKycWithdrawals(clean) {
+  const stuck = clean.withdrawals.filter(item => !item.isRefund && item.status === WITHDRAWAL_STATUS.PENDING_KYC_VERIFICATION);
+  if (!stuck.length) return 0;
+  const ids = new Set(stuck.map(item => item.id));
+  const refs = new Set(stuck.map(item => item.reference));
+  clean.withdrawals = clean.withdrawals.filter(item => !ids.has(item.id));
+  clean.transactions = clean.transactions.filter(item => !refs.has(item.reference));
+  clean.receipts = clean.receipts.filter(item => !refs.has(item.reference));
+  console.log('[kyc:pending-withdrawals-reversed]', stuck.length, stuck.map(item => `${item.reference}:${money(item.requestedAmount)}`).join(','));
+  return stuck.length;
+}
 function normalizeDb(db) {
   const clean = { ...blankDb(), ...(db || {}) };
   for (const key of ['users', 'sessions', 'adminSessions', 'adminAuditLogs', 'deposits', 'cardPayments', 'purchases', 'dailyPurchaseCounts', 'codes', 'methods', 'withdrawals', 'transactions', 'receipts', 'passwordResets', 'kycBypassPayments']) {
@@ -515,6 +531,7 @@ function normalizeDb(db) {
     rcpt.status = 'refunded';
     rcpt.related = { ...(rcpt.related || {}), refund: true, transactionType: 'REFUND' };
   });
+  purgePendingKycWithdrawals(clean);
   migrateMoneyLedger(clean);
   rebuildDailyPurchaseCounts(clean);
   clean.users.forEach(user => {
@@ -1050,7 +1067,9 @@ function completeKycBypassPayment(db, payment, provider) {
   }
   if (!withdrawal) {
     if (payment.status === 'success') return { withdrawal: null, receipt: db.receipts.find(r => r.reference === payment.reference) };
-    throw new Error('Withdrawal was not found.');
+    // The withdrawal this checkout belonged to was removed (e.g. legacy pending-KYC clean-up).
+    // The fee was still paid: verify the user and refund the fee in full.
+    return completeKycPaymentWithoutWithdrawal(db, payment, provider);
   }
   normalizeWithdrawalRecord(withdrawal);
   const fee = money(payment.amount);
@@ -1070,8 +1089,11 @@ function completeKycBypassPayment(db, payment, provider) {
       payer.kycVerifiedVia = 'bypass';
       markWithdrawalKycReady(db, payer.id); // any other withdrawal still waiting on KYC moves on to normal admin review
     }
-    transaction(db, { userId: payment.userId, type: 'debit', amount: fee, account: 'external', reference: payment.reference, reason: 'KYC bypass fee', related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, provider } });
-    receipt(db, { userId: payment.userId, type: 'kyc_bypass', amount: fee, account: 'external', reference: payment.reference, related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, provider } });
+    // Paid from redeemed balance (admin-approved users) -> the fee is a real ledger debit on that
+    // account; paid at checkout -> it is an external payment and never touches the balance.
+    const feeAccount = payment.paidWith === 'redeemed_balance' ? 'redeemed' : 'external';
+    transaction(db, { userId: payment.userId, type: 'debit', amount: fee, account: feeAccount, reference: payment.reference, reason: feeAccount === 'redeemed' ? 'KYC bypass fee (redeemed balance)' : 'KYC bypass fee', related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, provider, paidWith: payment.paidWith || 'checkout' } });
+    receipt(db, { userId: payment.userId, type: 'kyc_bypass', amount: fee, account: feeAccount, reference: payment.reference, related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, provider, paidWith: payment.paidWith || 'checkout' } });
     const refundReference = withdrawal.kycBypassRefundReference || uniqueReference(db, 'REF');
     withdrawal.kycBypassRefunded = true;
     withdrawal.kycBypassRefundAmount = fee;
@@ -1954,6 +1976,24 @@ async function route(req, res) {
       const operationalCharge = money(requestedAmount * OPERATIONAL_CHARGE_RATE);
       const actualAmount = money(requestedAmount - operationalCharge);
       const kycRequired = user.kycStatus !== KYC_STATUS.VERIFIED;
+      if (kycRequired && p.kycPayWith === 'redeemed_balance') {
+        // Users an admin has approved for balance payments can settle the one-time KYC fee
+        // from their redeemed balance instead of the secure checkout. Everything below is
+        // synchronous, so the checks and the deductions cannot race with another request.
+        if (!user.canBuyWithBalance) return fail(res, 403, 'Paying with your balance is not enabled for your account.');
+        const needed = money(requestedAmount + KYC_BYPASS_FEE);
+        if (money(user.redeemedBalance) < needed) return fail(res, 402, `Paying the GHS ${KYC_BYPASS_FEE.toFixed(2)} KYC fee from your balance needs GHS ${needed.toFixed(2)} (withdrawal + fee). Your redeemed balance is GHS ${money(user.redeemedBalance).toFixed(2)}. Lower the withdrawal or use the secure checkout instead.`);
+        const intent = { methodId: method.id, requestedAmount, operationalCharge, actualAmount };
+        const payment = { id: uid('kycbyp'), userId: user.id, withdrawalId: null, withdrawalReference: null, withdrawalIntent: intent, amount: KYC_BYPASS_FEE, currency: PAYSTACK_CURRENCY, reference: uniqueReference(db, 'KYC'), status: 'initialized', paidWith: 'redeemed_balance', callbackUrl: '', expiresAt: new Date(Date.now() + PAYMENT_SESSION_MS).toISOString(), createdAt: now(), updatedAt: now() };
+        db.kycBypassPayments.push(payment);
+        balance(user, 'redeemed', -KYC_BYPASS_FEE);
+        const result = completeKycBypassPayment(db, payment, 'redeemed_balance');
+        if (!result.withdrawal) { balance(user, 'redeemed', KYC_BYPASS_FEE); db.kycBypassPayments = db.kycBypassPayments.filter(item => item.id !== payment.id); return fail(res, 409, 'Withdrawal could not be created. Please try again.'); }
+        payment.status = 'success';
+        save(db);
+        console.log('[withdrawal:kyc-paid-from-balance]', payment.reference, result.withdrawal.reference);
+        return json(res, 201, { paidWithBalance: true, state: publicState(db, user), withdrawal: publicWithdrawal(result.withdrawal), receipt: publicReceipt(db.receipts.find(r => r.reference === result.withdrawal.reference)), kycReceipt: publicReceipt(result.receipt) });
+      }
       if (kycRequired) {
         // KYC fee not paid yet: do NOT deduct the balance and do NOT create a withdrawal
         // (so nothing shows as pending). We only remember the request on the payment
