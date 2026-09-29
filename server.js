@@ -53,18 +53,68 @@ const RATE_LIMITS = {
 const rateBuckets = new Map();
 // Withdrawal limit: nothing can be withdrawn until the redeemed balance reaches this.
 // The cheapest paid card pays out more than this, so buying + redeeming a first card clears it.
-const MIN_WITHDRAWAL = 100;
-const MIN_REDEEMED_CARDS_FOR_WITHDRAWAL = 3; // default; admins can change it live (db.settings)
+let MIN_WITHDRAWAL = 100; // live value; admins can change it (db.settings)
+const MIN_PURCHASED_CARDS_FOR_WITHDRAWAL = 3; // default; admins can change it live (db.settings)
 const MAX_WITHDRAWAL_CARD_REQUIREMENT = 50;
 function cleanCardRequirement(value) {
   const n = Math.trunc(Number(value));
-  return Number.isFinite(n) ? Math.min(MAX_WITHDRAWAL_CARD_REQUIREMENT, Math.max(0, n)) : MIN_REDEEMED_CARDS_FOR_WITHDRAWAL;
+  return Number.isFinite(n) ? Math.min(MAX_WITHDRAWAL_CARD_REQUIREMENT, Math.max(0, n)) : MIN_PURCHASED_CARDS_FOR_WITHDRAWAL;
 }
 function withdrawalCardRequirement(db) {
-  return cleanCardRequirement(db?.settings?.minRedeemedCardsForWithdrawal ?? MIN_REDEEMED_CARDS_FOR_WITHDRAWAL);
+  // Older data files stored this as minRedeemedCardsForWithdrawal; it is now a purchased-card count.
+  const s = db?.settings || {};
+  return cleanCardRequirement(s.minPurchasedCardsForWithdrawal ?? s.minRedeemedCardsForWithdrawal ?? MIN_PURCHASED_CARDS_FOR_WITHDRAWAL);
 }
-const OPERATIONAL_CHARGE_RATE = 0.10;
-const KYC_BYPASS_FEE = 70;
+let OPERATIONAL_CHARGE_RATE = 0.10;
+let KYC_BYPASS_FEE = 70;
+
+// ---- Admin-editable settings -------------------------------------------------
+// Every value below can be changed by an admin (Settings page). They are stored in
+// db.settings and copied into the live variables above on every load().
+const SETTING_LIMITS = {
+  minWithdrawal: { min: 1, max: 1000000 },
+  minPurchasedCardsForWithdrawal: { min: 0, max: MAX_WITHDRAWAL_CARD_REQUIREMENT },
+  dailyPurchaseLimit: { min: 1, max: 100 },
+  operationalChargeRate: { min: 0, max: 0.5 },
+  kycBypassFee: { min: 1, max: 100000 },
+  rewardMultiplierMin: { min: 0.1, max: 50 },
+  rewardMultiplierMax: { min: 0.1, max: 50 },
+};
+function settingsDefaults() {
+  return { minWithdrawal: 100, minPurchasedCardsForWithdrawal: MIN_PURCHASED_CARDS_FOR_WITHDRAWAL, dailyPurchaseLimit: 3, operationalChargeRate: 0.10, kycBypassFee: 70, rewardMultiplierMin: 3.52, rewardMultiplierMax: 4.42 };
+}
+function cleanSettings(raw) {
+  const d = settingsDefaults();
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const pick = (key, value, integer) => {
+    const n = Number(value);
+    const { min, max } = SETTING_LIMITS[key];
+    if (value === null || value === undefined || String(value).trim() === '' || !Number.isFinite(n) || n < min || n > max || (integer && !Number.isInteger(n))) return d[key];
+    return integer ? n : Math.round(n * 10000) / 10000;
+  };
+  const out = {
+    minWithdrawal: pick('minWithdrawal', src.minWithdrawal),
+    minPurchasedCardsForWithdrawal: withdrawalCardRequirement({ settings: src }),
+    dailyPurchaseLimit: pick('dailyPurchaseLimit', src.dailyPurchaseLimit, true),
+    operationalChargeRate: pick('operationalChargeRate', src.operationalChargeRate),
+    kycBypassFee: pick('kycBypassFee', src.kycBypassFee),
+    rewardMultiplierMin: pick('rewardMultiplierMin', src.rewardMultiplierMin),
+    rewardMultiplierMax: pick('rewardMultiplierMax', src.rewardMultiplierMax),
+  };
+  if (out.rewardMultiplierMin > out.rewardMultiplierMax) { out.rewardMultiplierMin = d.rewardMultiplierMin; out.rewardMultiplierMax = d.rewardMultiplierMax; }
+  return out;
+}
+function applySettings(settings) {
+  const s = cleanSettings(settings);
+  MIN_WITHDRAWAL = s.minWithdrawal;
+  DAILY_CARD_PURCHASE_LIMIT = s.dailyPurchaseLimit;
+  OPERATIONAL_CHARGE_RATE = s.operationalChargeRate;
+  KYC_BYPASS_FEE = s.kycBypassFee;
+  REWARD_MULTIPLIER_MIN = s.rewardMultiplierMin;
+  REWARD_MULTIPLIER_MAX = s.rewardMultiplierMax;
+  return s;
+}
+function currentSettings(db) { return cleanSettings(db?.settings); }
 const KYC_STATUS = {
   NOT_VERIFIED: 'NOT_VERIFIED',
   PENDING: 'PENDING',
@@ -98,8 +148,8 @@ const PRICE_TIERS = [
   { key: 'premium', min: 11, max: 20 },
   { key: 'vault', min: 21, max: 50 },
 ];
-const REWARD_MULTIPLIER_MIN = 3.52;
-const REWARD_MULTIPLIER_MAX = 4.42;
+let REWARD_MULTIPLIER_MIN = 3.52;
+let REWARD_MULTIPLIER_MAX = 4.42;
 const REWARD_BANDS = [
   { key: 'band-a', label: '$3 Band', minUsd: 3, maxUsd: 3 },
   { key: 'band-b', label: '$4-$5 Band', minUsd: 4, maxUsd: 5 },
@@ -113,7 +163,7 @@ const REWARD_BANDS = [
   { key: 'band-j', label: '$36-$40 Band', minUsd: 36, maxUsd: 40 },
   { key: 'band-k', label: '$41-$45 Band', minUsd: 41, maxUsd: 45 },
   { key: 'band-l', label: '$46-$50 Band', minUsd: 46, maxUsd: 50 },
-].map(band => ({ ...band, minRate: REWARD_MULTIPLIER_MIN, maxRate: REWARD_MULTIPLIER_MAX }));
+];
 
 function uid(prefix) { return `${prefix}_${crypto.randomBytes(9).toString('hex')}`; }
 function reference(kind) { return `PH-${kind}-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`; }
@@ -158,7 +208,8 @@ function stableToken(seed, length) {
 }
 function rewardBandFor(priceGhs) {
   const priceUsd = usdForGhs(priceGhs);
-  return REWARD_BANDS.find(band => priceUsd >= band.minUsd && priceUsd <= band.maxUsd) || REWARD_BANDS[REWARD_BANDS.length - 1];
+  const band = REWARD_BANDS.find(item => priceUsd >= item.minUsd && priceUsd <= item.maxUsd) || REWARD_BANDS[REWARD_BANDS.length - 1];
+  return { ...band, minRate: REWARD_MULTIPLIER_MIN, maxRate: REWARD_MULTIPLIER_MAX };
 }
 function rewardRangeForPrice(priceGhs) {
   const price = money(priceGhs);
@@ -200,7 +251,7 @@ function now() { return new Date().toISOString(); }
 const GHANA_TIME_ZONE = 'Africa/Accra';
 // Flat daily cap: a user may buy at most this many cards total per Ghana calendar
 // day, across every price tier combined (no longer tracked per tier).
-const DAILY_CARD_PURCHASE_LIMIT = 3;
+let DAILY_CARD_PURCHASE_LIMIT = 3;
 function ghanaCalendarDate(value = Date.now()) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: GHANA_TIME_ZONE,
@@ -253,7 +304,7 @@ function makeCards() {
     return i === 0 ? { ...card, ...gift, price: 0, priceGhs: 0, displayPriceUsd: 0, stock: 999999, active: true } : card;
   });
 }
-function blankDb() { return { version: 5, cards: makeCards(), users: [], sessions: [], adminSessions: [], adminAuditLogs: [], deposits: [], cardPayments: [], purchases: [], dailyPurchaseCounts: [], codes: [], methods: [], withdrawals: [], transactions: [], receipts: [], passwordResets: [], kycBypassPayments: [], settings: { minRedeemedCardsForWithdrawal: MIN_REDEEMED_CARDS_FOR_WITHDRAWAL } }; }
+function blankDb() { return { version: 5, cards: makeCards(), users: [], sessions: [], adminSessions: [], adminAuditLogs: [], deposits: [], cardPayments: [], purchases: [], dailyPurchaseCounts: [], codes: [], methods: [], withdrawals: [], transactions: [], receipts: [], passwordResets: [], kycBypassPayments: [], settings: settingsDefaults() }; }
 function syncCardCatalog(cards) {
   const generated = makeCards();
   const generatedMap = new Map(generated.map(card => [card.id, card]));
@@ -396,6 +447,10 @@ function migrateMoneyLedger(clean) {
 function redeemedCardsCount(db, userId) {
   return db.codes.filter(code => code.userId === userId && code.status === 'redeemed').length;
 }
+// Cards the user actually paid for. The free welcome gift never counts.
+function purchasedCardsCount(db, userId) {
+  return db.purchases.filter(item => item.userId === userId && !item.isFreeGift && Number(item.amountPaid ?? item.amount ?? 0) > 0).length;
+}
 function normalizeWithdrawalRecord(withdrawal) {
   const requestedAmount = money(withdrawal.requestedAmount ?? withdrawal.amount ?? 0);
   const isRefund = Boolean(withdrawal.isRefund || withdrawal.refundType === 'KYC_FEE_REFUND');
@@ -428,8 +483,8 @@ function normalizeDb(db) {
   for (const key of ['users', 'sessions', 'adminSessions', 'adminAuditLogs', 'deposits', 'cardPayments', 'purchases', 'dailyPurchaseCounts', 'codes', 'methods', 'withdrawals', 'transactions', 'receipts', 'passwordResets', 'kycBypassPayments']) {
     if (!Array.isArray(clean[key])) clean[key] = [];
   }
-  clean.settings = { ...(clean.settings && typeof clean.settings === 'object' ? clean.settings : {}) };
-  clean.settings.minRedeemedCardsForWithdrawal = cleanCardRequirement(clean.settings.minRedeemedCardsForWithdrawal ?? MIN_REDEEMED_CARDS_FOR_WITHDRAWAL);
+  clean.settings = cleanSettings(clean.settings);
+  applySettings(clean.settings); // must run before cards/withdrawals are normalised: they read the live values
   clean.cards = syncCardCatalog(clean.cards);
   clean.withdrawals.forEach(withdrawal => normalizeWithdrawalRecord(withdrawal));
   // Older versions represented the KYC fee refund as a redeemed-balance
@@ -636,10 +691,14 @@ function publicState(db, user) {
   const dailyRecord = db.dailyPurchaseCounts.find(item => item.userId === userId && item.purchaseDate === purchaseDate);
   const dailyPurchaseCount = Math.min(Number(dailyRecord?.count) || 0, DAILY_CARD_PURCHASE_LIMIT);
   return {
-    user: { id: user.id, name: user.name, email: user.email || '', phone: user.phone, contactEmailCapturedAt: user.contactEmailCapturedAt || null, createdAt: user.createdAt, walletBalance: user.walletBalance, redeemedBalance: user.redeemedBalance, hasPin: Boolean(user.pinHash), kycStatus: user.kycStatus || KYC_STATUS.NOT_VERIFIED, kycVerifiedAt: user.kycVerifiedAt || null, lifetimeRedeemedCards: redeemedCardsCount(db, user.id) },
+    user: { id: user.id, name: user.name, email: user.email || '', phone: user.phone, contactEmailCapturedAt: user.contactEmailCapturedAt || null, createdAt: user.createdAt, walletBalance: user.walletBalance, redeemedBalance: user.redeemedBalance, hasPin: Boolean(user.pinHash), kycStatus: user.kycStatus || KYC_STATUS.NOT_VERIFIED, kycVerifiedAt: user.kycVerifiedAt || null, lifetimeRedeemedCards: redeemedCardsCount(db, user.id), lifetimePurchasedCards: purchasedCardsCount(db, user.id) },
     cards, codes, methods: db.methods.filter(x => x.userId === userId), transactions: txs, receipts, purchases, withdrawals,
     // Flat daily total across all tiers, not per price tier.
     withdrawalCardRequirement: withdrawalCardRequirement(db),
+    kycBypassFee: KYC_BYPASS_FEE,
+    operationalChargeRate: OPERATIONAL_CHARGE_RATE,
+    rewardMultiplierMin: REWARD_MULTIPLIER_MIN,
+    rewardMultiplierMax: REWARD_MULTIPLIER_MAX,
     minWithdrawal: MIN_WITHDRAWAL,
     purchaseLimits: { date: purchaseDate, max: DAILY_CARD_PURCHASE_LIMIT, count: dailyPurchaseCount, resetAt: nextGhanaMidnightIso() },
   };
@@ -721,7 +780,7 @@ function verifyHubWebhookSignature(rawBody, signatureHeader) {
   if (!HUB_API_SECRET || !signatureHeader) return false;
   return safeEqual(signatureHeader, hubSignature(HUB_API_SECRET, rawBody));
 }
-function validKycBypass(payment, user) { return payment && user && payment.userId === user.id && Number(payment.amount) === KYC_BYPASS_FEE && payment.currency === PAYSTACK_CURRENCY; }
+function validKycBypass(payment, user) { return payment && user && payment.userId === user.id && Number(payment.amount) > 0 && payment.currency === PAYSTACK_CURRENCY; }
 // ---- Direct card payments -------------------------------------------------------
 // A card is paid for at the moment the customer taps BUY: the app opens a hub checkout
 // for exactly the card price, holds one unit of stock for the payment window, and
@@ -846,7 +905,7 @@ async function reconcileKycBypassPayment(reference) {
       payment.status = 'expired'; payment.updatedAt = now();
     }
     if (verified && ['initialized', 'PAYMENT_INITIALIZED'].includes(payment.status)) {
-      if (Math.round(Number(verified.amount) * 100) !== Math.round(KYC_BYPASS_FEE * 100) || verified.currency !== PAYSTACK_CURRENCY) {
+      if (Math.round(Number(verified.amount) * 100) !== Math.round(Number(payment.amount) * 100) || verified.currency !== PAYSTACK_CURRENCY) {
         save(db);
         return [409, { error: 'Payment details did not reconcile.' }];
       }
@@ -950,19 +1009,28 @@ function completeKycBypassPayment(db, payment, provider) {
   const withdrawal = db.withdrawals.find(item => item.id === payment.withdrawalId && item.userId === payment.userId);
   if (!withdrawal) throw new Error('Withdrawal was not found.');
   normalizeWithdrawalRecord(withdrawal);
+  const fee = money(payment.amount);
   if (payment.status !== 'success') {
     payment.status = 'success';
     payment.verifiedAt = now();
     payment.provider = provider;
     withdrawal.kycBypassUsed = true;
-    withdrawal.kycBypassFee = KYC_BYPASS_FEE;
+    withdrawal.kycBypassFee = fee;
     withdrawal.paymentStatus = 'success';
     approveWithdrawalAfterBypass(db, withdrawal, payment.reference);
-    transaction(db, { userId: payment.userId, type: 'debit', amount: KYC_BYPASS_FEE, account: 'external', reference: payment.reference, reason: 'KYC bypass fee', related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, provider } });
-    receipt(db, { userId: payment.userId, type: 'kyc_bypass', amount: KYC_BYPASS_FEE, account: 'external', reference: payment.reference, related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, provider } });
+    // KYC is a one-time step: after the bypass is paid the user is verified for good and is never asked again.
+    const payer = db.users.find(item => item.id === payment.userId);
+    if (payer) {
+      payer.kycStatus = KYC_STATUS.VERIFIED;
+      payer.kycVerifiedAt = payer.kycVerifiedAt || now();
+      payer.kycVerifiedVia = 'bypass';
+      markWithdrawalKycReady(db, payer.id); // any other withdrawal still waiting on KYC moves on to normal admin review
+    }
+    transaction(db, { userId: payment.userId, type: 'debit', amount: fee, account: 'external', reference: payment.reference, reason: 'KYC bypass fee', related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, provider } });
+    receipt(db, { userId: payment.userId, type: 'kyc_bypass', amount: fee, account: 'external', reference: payment.reference, related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, provider } });
     const refundReference = withdrawal.kycBypassRefundReference || uniqueReference(db, 'REF');
     withdrawal.kycBypassRefunded = true;
-    withdrawal.kycBypassRefundAmount = KYC_BYPASS_FEE;
+    withdrawal.kycBypassRefundAmount = fee;
     withdrawal.kycBypassRefundReference = refundReference;
     withdrawal.kycBypassRefundedAt = now();
     const refundedAt = withdrawal.kycBypassRefundedAt;
@@ -971,18 +1039,18 @@ function completeKycBypassPayment(db, payment, provider) {
     // the balance ledger.
     db.withdrawals.push(normalizeWithdrawalRecord({
       id: uid('wdl_refund'), userId: payment.userId, methodId: withdrawal.methodId,
-      amount: KYC_BYPASS_FEE, requestedAmount: KYC_BYPASS_FEE, operationalCharge: 0,
-      actualAmount: KYC_BYPASS_FEE, reference: refundReference, status: 'refunded',
+      amount: fee, requestedAmount: fee, operationalCharge: 0,
+      actualAmount: fee, reference: refundReference, status: 'refunded',
       isRefund: true, refundType: 'KYC_FEE_REFUND',
       refundForWithdrawalId: withdrawal.id, refundForWithdrawalReference: withdrawal.reference,
       refundedAt, createdAt: refundedAt,
     }));
-    transaction(db, { userId: payment.userId, type: 'credit', entryType: 'REFUND', amount: KYC_BYPASS_FEE, account: 'external', reference: refundReference, status: 'refunded', reason: 'KYC Fee Refund', related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, originalPaymentReference: payment.reference, refund: true, transactionType: 'REFUND', refundType: 'KYC_FEE_REFUND', provider } });
-    receipt(db, { userId: payment.userId, type: 'kyc_bypass_refund', amount: KYC_BYPASS_FEE, account: 'external', reference: refundReference, status: 'refunded', related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, originalPaymentReference: payment.reference, refund: true, transactionType: 'REFUND', refundType: 'KYC_FEE_REFUND', provider } });
+    transaction(db, { userId: payment.userId, type: 'credit', entryType: 'REFUND', amount: fee, account: 'external', reference: refundReference, status: 'refunded', reason: 'KYC Fee Refund', related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, originalPaymentReference: payment.reference, refund: true, transactionType: 'REFUND', refundType: 'KYC_FEE_REFUND', provider } });
+    receipt(db, { userId: payment.userId, type: 'kyc_bypass_refund', amount: fee, account: 'external', reference: refundReference, status: 'refunded', related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, originalPaymentReference: payment.reference, refund: true, transactionType: 'REFUND', refundType: 'KYC_FEE_REFUND', provider } });
     const originalTransaction = db.transactions.find(item => item.reference === withdrawal.reference);
-    if (originalTransaction) originalTransaction.related = { ...(originalTransaction.related || {}), kycBypassRefunded: true, kycBypassRefundAmount: KYC_BYPASS_FEE, kycBypassRefundReference: refundReference };
+    if (originalTransaction) originalTransaction.related = { ...(originalTransaction.related || {}), kycBypassRefunded: true, kycBypassRefundAmount: fee, kycBypassRefundReference: refundReference };
     const originalReceipt = db.receipts.find(item => item.reference === withdrawal.reference);
-    if (originalReceipt) originalReceipt.related = { ...(originalReceipt.related || {}), kycBypassRefunded: true, kycBypassRefundAmount: KYC_BYPASS_FEE, kycBypassRefundReference: refundReference };
+    if (originalReceipt) originalReceipt.related = { ...(originalReceipt.related || {}), kycBypassRefunded: true, kycBypassRefundAmount: fee, kycBypassRefundReference: refundReference };
   }
   return { withdrawal, receipt: db.receipts.find(r => r.reference === payment.reference) };
 }
@@ -1351,7 +1419,7 @@ async function route(req, res) {
     if (!originAllowed(req)) return fail(res, 403, 'Request origin is not allowed.');
     if (rateLimit(req, res, pathname)) return;
     if (req.method === 'GET' && pathname === '/api/health') return json(res, 200, { ok: true, hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET), appBaseUrl: APP_BASE_URL || requestOrigin(req), appBaseUrlConfigured: Boolean(APP_BASE_URL), dataFileConfigured: Boolean(process.env.PHANTOM_DATA_FILE), dataFile: DATA_FILE });
-    if (req.method === 'GET' && pathname === '/api/config') return json(res, 200, { minWithdrawal: MIN_WITHDRAWAL, minRedeemedCardsForWithdrawal: withdrawalCardRequirement(db), operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, appBaseUrl: APP_BASE_URL || requestOrigin(req) });
+    if (req.method === 'GET' && pathname === '/api/config') return json(res, 200, { minWithdrawal: MIN_WITHDRAWAL, minPurchasedCardsForWithdrawal: withdrawalCardRequirement(db), operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, appBaseUrl: APP_BASE_URL || requestOrigin(req) });
     // The browser lands here after Paystack checkout, via the hub's own redirectUrl.
     // We never trust the hub's ?status= query param blindly — we re-verify the payment
     // with the hub server-side right here, then send a single HTTP redirect straight
@@ -1424,7 +1492,7 @@ async function route(req, res) {
         const fresh = load();
         const payment = fresh.kycBypassPayments.find(x => x.paystackReference === reference);
         if (!payment) return json(res, 200, { ok: true, unmatched: true });
-        const matches = Math.round(Number(event.amount) * 100) === Math.round(KYC_BYPASS_FEE * 100) && String(event.currency) === PAYSTACK_CURRENCY
+        const matches = Math.round(Number(event.amount) * 100) === Math.round(Number(payment.amount) * 100) && String(event.currency) === PAYSTACK_CURRENCY
           && event.metadata?.purpose === 'KYC_BYPASS' && event.metadata?.transactionId === payment.reference;
         if (!matches) { console.error('[hub:webhook] KYC bypass event did not reconcile', reference); return json(res, 200, { ok: true, mismatched: true }); }
         if (status === 'SUCCESS') completeKycBypassPayment(fresh, payment, 'hub');
@@ -1501,7 +1569,7 @@ async function route(req, res) {
           withdrawals: recent(db.withdrawals.filter(item => !item.isRefund), item => adminWithdrawalRow(db, item)),
         },
         trend: adminTrend(db),
-        settings: { minWithdrawal: MIN_WITHDRAWAL, minRedeemedCardsForWithdrawal: withdrawalCardRequirement(db), maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, dailyPurchaseLimit: DAILY_CARD_PURCHASE_LIMIT, operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET) },
+        settings: { minWithdrawal: MIN_WITHDRAWAL, minPurchasedCardsForWithdrawal: withdrawalCardRequirement(db), maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS, dailyPurchaseLimit: DAILY_CARD_PURCHASE_LIMIT, operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET) },
       });
     }
     if (req.method === 'GET' && pathname === '/api/admin/users') {
@@ -1586,17 +1654,36 @@ async function route(req, res) {
     if (req.method === 'POST' && /^\/api\/admin\/withdrawals\/[^/]+\/reject$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const ref = decodeURIComponent(pathname.split('/')[4]); const withdrawal = db.withdrawals.find(item => item.reference === ref); if (!withdrawal) return fail(res, 404, 'Withdrawal was not found.'); const before = { ...withdrawal }; const p = await body(req); const rejected = rejectWithdrawal(db, withdrawal, p.note); adminAudit(db, { admin, action: 'withdrawal.reject', targetType: 'withdrawal', targetId: ref, before, after: { ...withdrawal }, reason: p.note }); save(db); console.log('[withdrawal:rejected]', ref); return json(res, 200, { ok: true, withdrawal: publicWithdrawal(rejected.withdrawal), transaction: rejected.transaction && publicTransaction(rejected.transaction), receipt: rejected.receipt && publicReceipt(rejected.receipt) }); }
     if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/kyc\/verify$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const userId = decodeURIComponent(pathname.split('/')[4]); const target = db.users.find(item => item.id === userId); if (!target) return fail(res, 404, 'User was not found.'); const p = await body(req); const before = { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt }; target.kycStatus = KYC_STATUS.VERIFIED; target.kycVerifiedAt = now(); const released = markWithdrawalKycReady(db, target.id, p.note); adminAudit(db, { admin, action: 'kyc.verify', targetType: 'user', targetId: userId, before, after: { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt, releasedWithdrawals: released.map(item => item.reference) }, reason: p.note }); save(db); console.log('[kyc:verified]', userId, released.length); return json(res, 200, { ok: true, user: adminSafeUser(target, db), releasedWithdrawals: released.map(publicWithdrawal) }); }
     if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/kyc\/reject$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const userId = decodeURIComponent(pathname.split('/')[4]); const target = db.users.find(item => item.id === userId); if (!target) return fail(res, 404, 'User was not found.'); const p = await body(req); const before = { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt }; target.kycStatus = KYC_STATUS.REJECTED; target.kycVerifiedAt = null; adminAudit(db, { admin, action: 'kyc.reject', targetType: 'user', targetId: userId, before, after: { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt }, reason: p.note }); save(db); console.log('[kyc:rejected]', userId); return json(res, 200, { ok: true, user: adminSafeUser(target, db) }); }
-    if (req.method === 'POST' && pathname === '/api/admin/settings/withdrawal-cards') {
+    if (req.method === 'POST' && (pathname === '/api/admin/settings' || pathname === '/api/admin/settings/withdrawal-cards')) {
       const admin = requireAdmin(req, res, db); if (!admin) return;
       const p = await body(req);
-      const count = (p.count === null || p.count === undefined || String(p.count).trim() === '') ? NaN : Number(p.count);
-      if (!Number.isInteger(count) || count < 0 || count > MAX_WITHDRAWAL_CARD_REQUIREMENT) return fail(res, 400, `Enter a whole number from 0 to ${MAX_WITHDRAWAL_CARD_REQUIREMENT}.`);
-      const before = { minRedeemedCardsForWithdrawal: withdrawalCardRequirement(db) };
-      db.settings = { ...(db.settings || {}), minRedeemedCardsForWithdrawal: count };
-      adminAudit(db, { admin, action: 'settings.withdrawalCards', targetType: 'settings', targetId: 'minRedeemedCardsForWithdrawal', before, after: { minRedeemedCardsForWithdrawal: count }, reason: String(p.note || '').slice(0, 500) });
+      // Legacy alias: { count } only changes the withdrawal card requirement.
+      const input = pathname.endsWith('withdrawal-cards') ? { minPurchasedCardsForWithdrawal: p.count } : p;
+      const fields = { minWithdrawal: false, minPurchasedCardsForWithdrawal: true, dailyPurchaseLimit: true, operationalChargeRate: false, kycBypassFee: false, rewardMultiplierMin: false, rewardMultiplierMax: false };
+      const labels = { minWithdrawal: 'Minimum withdrawal', minPurchasedCardsForWithdrawal: 'Cards required to withdraw', dailyPurchaseLimit: 'Daily purchase limit', operationalChargeRate: 'Operational charge', kycBypassFee: 'KYC bypass fee', rewardMultiplierMin: 'Reward multiplier (min)', rewardMultiplierMax: 'Reward multiplier (max)' };
+      const before = currentSettings(db);
+      const next = { ...before };
+      let changedAny = false;
+      for (const [key, integer] of Object.entries(fields)) {
+        if (!(key in input)) continue;
+        const raw = input[key];
+        const n = (raw === null || raw === undefined || String(raw).trim() === '') ? NaN : Number(raw);
+        const { min, max } = SETTING_LIMITS[key];
+        if (!Number.isFinite(n) || n < min || n > max || (integer && !Number.isInteger(n))) {
+          return fail(res, 400, integer ? `${labels[key]}: enter a whole number from ${min} to ${max}.` : `${labels[key]}: enter a number from ${min} to ${max}.`);
+        }
+        next[key] = integer ? n : Math.round(n * 10000) / 10000;
+        changedAny = true;
+      }
+      if (!changedAny) return fail(res, 400, 'No settings were provided.');
+      if (next.rewardMultiplierMin > next.rewardMultiplierMax) return fail(res, 400, 'Reward multiplier (min) cannot be higher than the maximum.');
+      db.settings = next;
+      applySettings(next);
+      db.cards = syncCardCatalog(db.cards); // reward ranges shown on cards follow the new multipliers
+      adminAudit(db, { admin, action: 'settings.update', targetType: 'settings', targetId: 'settings', before, after: next, reason: String(p.note || '').slice(0, 500) });
       save(db);
-      console.log('[settings:withdrawal-cards]', before.minRedeemedCardsForWithdrawal, '->', count);
-      return json(res, 200, { ok: true, minRedeemedCardsForWithdrawal: count });
+      console.log('[settings:update]', JSON.stringify(before), '->', JSON.stringify(next));
+      return json(res, 200, { ok: true, settings: { ...next, maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS }, minPurchasedCardsForWithdrawal: next.minPurchasedCardsForWithdrawal });
     }
     if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/block$/.test(pathname)) {
       const admin = requireAdmin(req, res, db); if (!admin) return;
@@ -1674,17 +1761,6 @@ async function route(req, res) {
     if (req.method === 'POST' && pathname === '/api/claim-gift') return handleClaimGiftRequest(req, res);
     const user = requireUser(req, res, db); if (!user) return;
     if (req.method === 'GET' && pathname === '/api/state') return json(res, 200, publicState(db, user));
-    if (req.method === 'POST' && pathname === '/api/kyc/submissions') {
-      const p = await body(req); const withdrawal = db.withdrawals.find(item => item.reference === String(p.withdrawalReference || '') && item.userId === user.id);
-      if (!withdrawal || withdrawal.status !== WITHDRAWAL_STATUS.PENDING_KYC_VERIFICATION) return fail(res, 400, 'This withdrawal is not awaiting KYC verification.');
-      if (String(p.name || '').trim().length < 2 || !validMobile(normalizePhone(p.phone))) return fail(res, 400, 'Enter your full legal name and a valid 10-digit mobile number.');
-      const allowedDocumentTypes = new Set(['image/jpeg', 'image/png', 'application/pdf']);
-      const documents = Array.isArray(p.documents) ? p.documents : [];
-      if (documents.length !== 2 || documents.some(document => !document || !allowedDocumentTypes.has(document.type) || !Number.isInteger(document.size) || document.size < 1 || document.size > 5 * 1024 * 1024 || String(document.name || '').trim().length < 1 || String(document.name).length > 180 || typeof document.content !== 'string')) return fail(res, 400, 'Upload a valid government-issued ID and proof of address (JPG, PNG, or PDF; up to 5 MB each).');
-      const storedDocuments = persistKycDocuments(user.id, documents);
-      user.kycStatus = KYC_STATUS.PENDING; user.kycSubmittedAt = user.kycSubmittedAt || now(); user.kycSubmission = { name: String(p.name).trim().slice(0, 120), phone: normalizePhone(p.phone), documents: storedDocuments, withdrawalReference: withdrawal.reference, submittedAt: now() };
-      save(db); return json(res, 201, { state: publicState(db, user), kycStatus: user.kycStatus });
-    }
     if (req.method === 'POST' && pathname === '/api/auth/password') { const p = await body(req); if (!await passwordMatches(String(p.currentPassword || ''), user.passwordHash)) return fail(res, 401, 'Current password is incorrect.'); if (String(p.newPassword || '').length < 6) return fail(res, 400, 'New password must be at least 6 characters.'); user.passwordHash = await hash(p.newPassword); save(db); return json(res, 200, { ok: true, state: publicState(db, user) }); }
     if (req.method === 'POST' && pathname === '/api/auth/pin') { const p = await body(req); if (!/^\d{4}$/.test(p.newPin || '')) return fail(res, 400, 'New withdrawal PIN must be four digits.'); if (user.pinHash && !await passwordMatches(String(p.currentPin || ''), user.pinHash)) return fail(res, 401, 'Current withdrawal PIN is incorrect.'); user.pinHash = await hash(p.newPin); save(db); return json(res, 200, { ok: true, state: publicState(db, user) }); }
     if (req.method === 'GET' && /^\/api\/card-payments\/[^/]+$/.test(pathname)) {
@@ -1756,11 +1832,11 @@ async function route(req, res) {
           ? `Withdrawals start at GHS ${MIN_WITHDRAWAL.toFixed(2)}. Your redeemed balance is GHS ${money(user.redeemedBalance).toFixed(2)}, so redeem more cards to reach it.`
           : `Withdrawals start at GHS ${MIN_WITHDRAWAL.toFixed(2)}. Purchase and redeem your first card to reach it.`);
       }
-      const lifetimeRedeemedCards = redeemedCardsCount(db, user.id);
+      const purchasedCards = purchasedCardsCount(db, user.id);
       const requiredCards = withdrawalCardRequirement(db);
-      if (lifetimeRedeemedCards < requiredCards) {
-        const remaining = Math.max(0, requiredCards - lifetimeRedeemedCards);
-        return fail(res, 400, `Redeem ${remaining} more card${remaining === 1 ? '' : 's'} to unlock withdrawals.`);
+      if (purchasedCards < requiredCards) {
+        const remaining = Math.max(0, requiredCards - purchasedCards);
+        return fail(res, 400, `Purchase ${remaining} more card${remaining === 1 ? '' : 's'} to unlock withdrawals.`);
       }
       if (!method) return fail(res, 400, 'Choose a saved withdrawal method.');
       if (!Number.isFinite(requestedAmount) || requestedAmount < MIN_WITHDRAWAL) return fail(res, 400, `Minimum withdrawal is GHS ${MIN_WITHDRAWAL.toFixed(2)}.`);
@@ -1789,7 +1865,7 @@ async function route(req, res) {
       if (withdrawal.status !== WITHDRAWAL_STATUS.PENDING_KYC_VERIFICATION) return fail(res, 400, 'KYC bypass is available only for withdrawals pending KYC verification.');
       if (withdrawal.kycBypassUsed) return fail(res, 400, 'KYC bypass has already been used for this withdrawal.');
       if (!HUB_BASE_URL || !HUB_API_KEY || !HUB_API_SECRET) return fail(res, 503, 'Secure KYC payment checkout is not configured.');
-      const existing = db.kycBypassPayments.find(item => item.withdrawalId === withdrawal.id && item.userId === user.id && ['initialized', 'PAYMENT_INITIALIZED'].includes(item.status) && new Date(item.expiresAt).getTime() > Date.now());
+      const existing = db.kycBypassPayments.find(item => item.withdrawalId === withdrawal.id && item.userId === user.id && ['initialized', 'PAYMENT_INITIALIZED'].includes(item.status) && Number(item.amount) === KYC_BYPASS_FEE && new Date(item.expiresAt).getTime() > Date.now());
       const payment = existing || { id: uid('kycbyp'), userId: user.id, withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, amount: KYC_BYPASS_FEE, currency: PAYSTACK_CURRENCY, reference: uniqueReference(db, 'KYC'), status: 'initialized', callbackUrl: kycBypassCallback(req, '', ''), returnOrigin: '', expiresAt: new Date(Date.now() + PAYMENT_SESSION_MS).toISOString(), createdAt: now(), updatedAt: now() };
       const p = await body(req);
       payment.callbackUrl = kycBypassCallback(req, payment.reference, p.returnOrigin);

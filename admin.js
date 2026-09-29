@@ -88,7 +88,7 @@
     async function refreshInBackground() {
         if (document.hidden || backgroundRefreshInFlight || $('#adminApp').classList.contains('is-hidden')) return;
         const activeElement = document.activeElement;
-        if (activeElement?.matches('input, textarea, select') || ($('#cardReqSave') && !$('#cardReqSave').disabled) || $('#actionModal').classList.contains('open') || $('#detailDrawer').classList.contains('open')) return;
+        if (activeElement?.matches('input, textarea, select') || ($('#settingsSave') && !$('#settingsSave').disabled) || $('#actionModal').classList.contains('open') || $('#detailDrawer').classList.contains('open')) return;
         backgroundRefreshInFlight = true;
         try { await loadView(state.view, { silent: true }); } finally { backgroundRefreshInFlight = false; }
     }
@@ -221,38 +221,52 @@
     function renderKyc() { const data = state.cache.kyc; const rows = data.items.map(item => `<tr ${rowClick(item.id, 'kyc')}><td><strong>${escape(item.name)}</strong><small>${escape(item.id)} · ${escape(item.email || item.phone)}</small></td><td>${escape(item.documents?.length || 0)} documents</td><td>${shortDate(item.kycSubmittedAt || item.createdAt)}</td><td>${status(item.kycStatus)}</td><td>${item.kycStatus === 'PENDING' ? `<div class="row-actions"><button class="tiny-button" data-action="verify-kyc" data-id="${escape(item.id)}">Verify</button><button class="tiny-button danger" data-action="reject-kyc" data-id="${escape(item.id)}">Reject</button></div>` : '—'}</td></tr>`).join(''); return pageHeading('KYC review', 'Review submitted identity documents before releasing withdrawals.') + toolbar('Search user, email, phone, or ID…', `<select id="statusFilter"><option value="">All review states</option><option value="PENDING">Pending</option><option value="VERIFIED">Verified</option><option value="REJECTED">Rejected</option></select>`) + `<section class="panel table-panel">${table(['User', 'Documents', 'Submitted', 'Status', 'Actions'], rows, 'No KYC submissions found.')}${pagination(data)}</section>`; }
     function renderTransactions() { const data = state.cache.transactions; const rows = data.items.map(item => `<tr ${rowClick(item.id, 'transaction')}><td><strong>${escape(item.reference)}</strong><small>${escape(item.id)}</small></td><td>${escape(item.userName)}<small>${escape(item.userId)}</small></td><td>${escape(item.account)}</td><td>${escape(item.type)}</td><td class="amount">${item.type === 'debit' ? '−' : '+'}${money(item.amount)}</td><td>${status(item.status)}</td><td>${shortDate(item.createdAt)}</td></tr>`).join(''); return pageHeading('Transactions', 'Read-only financial ledger view. Historical records cannot be edited.') + toolbar('Search reference, user, reason, or account…', `<select id="statusFilter"><option value="">All statuses</option><option value="completed">Completed</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="refunded">Refunded</option></select>`) + `<section class="panel table-panel">${table(['Reference', 'User', 'Account', 'Type', 'Amount', 'Status', 'Created'], rows, 'No transactions found.')}${pagination(data)}</section>`; }
     function renderAudit() { const data = state.cache.audit; const rows = data.items.map(item => `<tr><td><strong>${escape(item.action)}</strong><small>${escape(item.adminEmail)}</small></td><td>${escape(item.targetType)}<small>${escape(item.targetId)}</small></td><td>${escape(item.reason || '—')}</td><td>${date(item.createdAt)}</td></tr>`).join(''); return pageHeading('Audit logs', 'Administrative actions recorded with actor, target, reason, and state snapshots.') + toolbar('Search action, actor, target, or reason…') + `<section class="panel table-panel">${table(['Action / actor', 'Target', 'Reason', 'Created'], rows, 'No admin actions recorded yet.')}${pagination(data)}</section>`; }
-    function withdrawalCardsPanel(s) {
-        const current = Number(s.minRedeemedCardsForWithdrawal ?? 3), max = Number(s.maxWithdrawalCardRequirement ?? 50);
-        return `<div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Withdrawal card requirement</h3></div>
-            <p style="color:var(--muted);line-height:1.7;margin:0 0 14px">How many cards a user must redeem before they can request a withdrawal. Changes apply immediately to everyone; set 0 to remove the requirement.</p>
-            <div class="card-req" data-current="${current}" data-max="${max}">
-                <button type="button" class="card-req-btn" data-req-step="-1" aria-label="Require one fewer card">−</button>
-                <input id="cardReqInput" class="card-req-input" type="number" min="0" max="${max}" step="1" value="${current}" aria-label="Cards required before withdrawal">
-                <button type="button" class="card-req-btn" data-req-step="1" aria-label="Require one more card">+</button>
-                <button type="button" class="btn-save-req" id="cardReqSave" disabled>Save</button>
-            </div>
-            <p id="cardReqMsg" style="color:var(--muted);font-size:12px;margin:10px 0 0">Currently ${current} card${current === 1 ? '' : 's'}.</p></div>`;
+    // ---- Settings: every operational value is editable and saved together ----
+    const SETTING_FIELDS = [
+        { key: 'minWithdrawal', label: 'Withdrawal limit (minimum balance)', unit: 'GHS', step: '0.01', help: 'Smallest amount a user can withdraw, and the balance they need before withdrawing.' },
+        { key: 'minPurchasedCardsForWithdrawal', label: 'Cards required to withdraw', unit: 'cards purchased', step: '1', help: 'How many cards a user must have purchased (free gifts do not count). 0 removes the requirement.' },
+        { key: 'dailyPurchaseLimit', label: 'Daily purchase limit', unit: 'cards / day', step: '1', help: 'Maximum cards one user can buy per day, all tiers combined.' },
+        { key: 'operationalChargePercent', label: 'Operational charge', unit: '%', step: '0.01', help: 'Deducted from every withdrawal.' },
+        { key: 'kycBypassFee', label: 'KYC bypass fee', unit: 'GHS', step: '0.01', help: 'One-time refundable fee that verifies a user for good.' },
+        { key: 'rewardMultiplierMin', label: 'Reward multiplier (min)', unit: '×', step: '0.01', help: 'Lowest reward multiplier applied to a card price.' },
+        { key: 'rewardMultiplierMax', label: 'Reward multiplier (max)', unit: '×', step: '0.01', help: 'Highest reward multiplier applied to a card price.' },
+    ];
+    function settingsFormValues(s) {
+        return { minWithdrawal: Number(s.minWithdrawal ?? 100), minPurchasedCardsForWithdrawal: Number(s.minPurchasedCardsForWithdrawal ?? 3), dailyPurchaseLimit: Number(s.dailyPurchaseLimit ?? 3), operationalChargePercent: Math.round(Number(s.operationalChargeRate ?? 0.1) * 10000) / 100, kycBypassFee: Number(s.kycBypassFee ?? 70), rewardMultiplierMin: Number(s.rewardMultiplierMin ?? 3.52), rewardMultiplierMax: Number(s.rewardMultiplierMax ?? 4.42) };
     }
-    function syncCardReqControls() {
-        const wrap = $('.card-req'); if (!wrap) return;
-        const input = $('#cardReqInput'), save = $('#cardReqSave');
-        const max = Number(wrap.dataset.max), current = Number(wrap.dataset.current);
-        const value = Number(input.value);
-        const valid = input.value !== '' && Number.isInteger(value) && value >= 0 && value <= max;
-        save.disabled = !valid || value === current;
-        $('#cardReqMsg').textContent = valid ? (value === current ? `Currently ${current} card${current === 1 ? '' : 's'}.` : `Unsaved: users will need ${value} redeemed card${value === 1 ? '' : 's'}.`) : `Enter a whole number from 0 to ${max}.`;
+    function settingsPanel(s) {
+        const values = settingsFormValues(s);
+        return `<div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Platform settings</h3></div>
+            <p style="color:var(--muted);line-height:1.7;margin:0 0 14px">Changes apply immediately to everyone.</p>
+            <div class="settings-form" id="settingsForm">${SETTING_FIELDS.map(f => `<label class="setting-field"><span>${escape(f.label)}</span><div class="setting-input"><input type="number" inputmode="decimal" step="${f.step}" data-setting="${f.key}" data-original="${values[f.key]}" value="${values[f.key]}"><em>${escape(f.unit)}</em></div><small>${escape(f.help)}</small></label>`).join('')}</div>
+            <div style="display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap"><button type="button" class="btn-save-req" id="settingsSave" disabled>Save changes</button><button type="button" class="btn-save-req" id="settingsReset" style="background:transparent" disabled>Discard</button><span id="settingsMsg" style="color:var(--muted);font-size:12px">No unsaved changes.</span></div></div>`;
     }
-    async function saveCardRequirement() {
-        const input = $('#cardReqInput'), save = $('#cardReqSave'); const count = Number(input.value);
+    function settingsFormState() {
+        const inputs = [...document.querySelectorAll('#settingsForm [data-setting]')];
+        const changed = inputs.filter(i => i.value !== i.dataset.original);
+        const invalid = inputs.some(i => i.value.trim() === '' || !Number.isFinite(Number(i.value)));
+        return { inputs, changed, invalid };
+    }
+    function syncSettingsControls() {
+        const save = $('#settingsSave'); if (!save) return;
+        const { changed, invalid } = settingsFormState();
+        save.disabled = invalid || !changed.length;
+        $('#settingsReset').disabled = !changed.length;
+        $('#settingsMsg').textContent = invalid ? 'Enter a number in every field.' : changed.length ? `${changed.length} unsaved change${changed.length === 1 ? '' : 's'}.` : 'No unsaved changes.';
+    }
+    async function saveSettings() {
+        const save = $('#settingsSave'); const { changed } = settingsFormState(); if (!changed.length) return;
+        const payload = {};
+        changed.forEach(i => { const v = Number(i.value); if (i.dataset.setting === 'operationalChargePercent') payload.operationalChargeRate = Math.round(v * 100) / 10000; else payload[i.dataset.setting] = v; });
         save.disabled = true;
         try {
-            const result = await api('/api/admin/settings/withdrawal-cards', { method: 'POST', body: JSON.stringify({ count }) });
-            state.summary.settings.minRedeemedCardsForWithdrawal = result.minRedeemedCardsForWithdrawal;
-            toast(`Users now need ${result.minRedeemedCardsForWithdrawal} redeemed card${result.minRedeemedCardsForWithdrawal === 1 ? '' : 's'} to withdraw.`);
+            const result = await api('/api/admin/settings', { method: 'POST', body: JSON.stringify(payload) });
+            state.summary.settings = { ...(state.summary.settings || {}), ...result.settings };
+            toast('Settings saved. They now apply to all users.');
             render('settings');
-        } catch (error) { toast(error.message); syncCardReqControls(); }
+        } catch (error) { toast(error.message); syncSettingsControls(); }
     }
-    function renderSettings() { const s = state.summary?.settings || {}; return pageHeading('Settings', 'Operational configuration. Only the withdrawal card requirement can be changed here.') + withdrawalCardsPanel(s) + `<div class="settings-grid" style="margin-top:16px">${Object.entries({ 'Withdrawal limit (minimum balance)': money(s.minWithdrawal), 'Cards required to withdraw': `${s.minRedeemedCardsForWithdrawal} redeemed card${Number(s.minRedeemedCardsForWithdrawal) === 1 ? '' : 's'}`, 'Daily purchase limit': `${s.dailyPurchaseLimit} per day (all tiers combined)`, 'Operational charge': `${Number(s.operationalChargeRate || 0) * 100}%`, 'KYC bypass fee': money(s.kycBypassFee), 'Reward range': `${s.rewardMultiplierMin}× – ${s.rewardMultiplierMax}×`, 'Payment service': s.paymentServiceConfigured ? 'Configured' : 'Not configured' }).map(([label, value]) => `<div class="setting"><span>${escape(label)}</span><strong>${escape(value)}</strong></div>`).join('')}</div><div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Financial safety</h3></div><p style="color:var(--muted);line-height:1.7;margin:0">Direct balance editing, payment status editing, transaction editing, and environment-secret editing are not available in this console. Corrections must be represented by controlled backend workflows and audited compensating records.</p></div>`; }
+    function renderSettings() { const s = state.summary?.settings || {}; return pageHeading('Settings', 'Operational configuration. Every value below can be edited.') + settingsPanel(s) + `<div class="settings-grid" style="margin-top:16px"><div class="setting"><span>Payment service</span><strong>${s.hubConfigured ? 'Configured' : 'Not configured'}</strong></div></div><div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Financial safety</h3></div><p style="color:var(--muted);line-height:1.7;margin:0">Direct balance editing, payment status editing, transaction editing, and environment-secret editing are not available in this console. Corrections must be represented by controlled backend workflows and audited compensating records.</p></div>`; }
     function renderReconciliation() { return pageHeading('Payment reconciliation', 'Compare app and Payment Hub references before investigating a top-up.') + `<section class="panel"><div class="panel-heading"><h3>Open a deposit from the Deposits page</h3></div><p style="margin:0;color:var(--muted);line-height:1.7">Deposits store the Payment Hub / Paystack reference alongside the local record, so the console clearly labels any unavailable external data instead of inventing a status.</p><button class="primary-button" style="margin-top:18px" data-go="deposits">View deposits</button></section>`; }
 
     async function openDetail(type, id) {
@@ -274,11 +288,10 @@
     function openAction(action, id) { state.action = { action, id }; const copy = { approve: ['Approve withdrawal', 'This will mark the pending withdrawal as approved. Confirm the requested amount and payout before continuing.'], reject: ['Reject withdrawal', 'This will reject the withdrawal and return the requested amount to Redeemed Balance.'], 'verify-kyc': ['Verify KYC', 'This will verify the user and release their KYC-blocked withdrawals to the pending queue.'], 'reject-kyc': ['Reject KYC', 'This will mark the user KYC as rejected. A reason is required.'], 'block-user': ['Block user', 'This will immediately sign the user out and prevent them from logging in, buying cards, or withdrawing until unblocked. A reason is required.'], 'unblock-user': ['Unblock user', 'This will restore the user\'s ability to sign in, buy cards, and withdraw.'] }[action]; const eyebrow = { approve: 'WITHDRAWAL REVIEW', reject: 'WITHDRAWAL REVIEW', 'verify-kyc': 'KYC REVIEW', 'reject-kyc': 'KYC REVIEW', 'block-user': 'ACCOUNT ACCESS', 'unblock-user': 'ACCOUNT ACCESS' }[action]; $('#actionEyebrow').textContent = eyebrow; $('#actionTitle').textContent = copy[0]; $('#actionCopy').textContent = copy[1]; $('#actionNote').value = ''; $('#actionError').textContent = ''; $('#actionModal').classList.add('open'); }
     async function confirmAction() { const { action, id } = state.action || {}; const note = $('#actionNote').value.trim(); if (!note) return $('#actionError').textContent = 'A reason or note is required.'; const endpoint = { approve: `/api/admin/withdrawals/${encodeURIComponent(id)}/approve`, reject: `/api/admin/withdrawals/${encodeURIComponent(id)}/reject`, 'verify-kyc': `/api/admin/users/${encodeURIComponent(id)}/kyc/verify`, 'reject-kyc': `/api/admin/users/${encodeURIComponent(id)}/kyc/reject`, 'block-user': `/api/admin/users/${encodeURIComponent(id)}/block`, 'unblock-user': `/api/admin/users/${encodeURIComponent(id)}/unblock` }[action]; try { $('#actionConfirm').disabled = true; await api(endpoint, { method: 'POST', body: JSON.stringify({ note }) }); $('#actionModal').classList.remove('open'); toast('Action completed and recorded in the audit log.'); if (action === 'block-user' || action === 'unblock-user') { if (state.view === 'users') await loadView(state.view); await openDetail('user', id); } else { await loadView(state.view); } } catch (error) { $('#actionError').textContent = error.message; } finally { $('#actionConfirm').disabled = false; } }
 
-    document.addEventListener('input', event => { if (event.target.id === 'cardReqInput') syncCardReqControls(); });
+    document.addEventListener('input', event => { if (event.target.matches?.('#settingsForm [data-setting]')) syncSettingsControls(); });
     document.addEventListener('click', event => {
-        const stepBtn = event.target.closest('[data-req-step]');
-        if (stepBtn) { const input = $('#cardReqInput'); const max = Number($('.card-req').dataset.max); input.value = Math.min(max, Math.max(0, (Number(input.value) || 0) + Number(stepBtn.dataset.reqStep))); return syncCardReqControls(); }
-        if (event.target.closest('#cardReqSave')) return saveCardRequirement();
+        if (event.target.closest('#settingsSave')) return saveSettings();
+        if (event.target.closest('#settingsReset')) { document.querySelectorAll('#settingsForm [data-setting]').forEach(i => { i.value = i.dataset.original; }); return syncSettingsControls(); }
         const navButton = event.target.closest('[data-view]'); if (navButton) return nav(navButton.dataset.view);
         const go = event.target.closest('[data-go]'); if (go) return nav(go.dataset.go);
         const action = event.target.closest('[data-action]'); if (action) return openAction(action.dataset.action, action.dataset.id);

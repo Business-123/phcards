@@ -21,7 +21,7 @@ async function waitForHealth(baseUrl) {
   throw new Error('Test server did not start.');
 }
 
-test('admin can change how many redeemed cards a user needs before withdrawing, and it is enforced', { timeout: 20000 }, async t => {
+test('admin can change how many purchased cards a user needs before withdrawing, and it is enforced', { timeout: 20000 }, async t => {
   const port = await freePort();
   const dataFile = path.join(os.tmpdir(), `phantom-withdraw-cards-${process.pid}-${Date.now()}.json`);
   const server = spawn(process.execPath, ['server.js'], {
@@ -65,24 +65,59 @@ test('admin can change how many redeemed cards a user needs before withdrawing, 
   const db = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
   db.transactions.push({ id: 'credit_limit_test', userId: signup.data.user.id, type: 'credit', amount: 150, account: 'redeemed', reference: 'REDEMPTION_LIMIT_TEST', status: 'completed', reason: 'Redeemed code', related: {}, createdAt: new Date().toISOString() });
   fs.writeFileSync(dataFile, JSON.stringify(db));
-  assert.match((await withdraw()).data.error, /Redeem 3 more cards/, 'with GHS 100+ the card requirement applies next');
+  assert.match((await withdraw()).data.error, /Purchase 3 more cards/, 'with GHS 100+ the card requirement applies next');
 
   const set = await asAdmin('/api/admin/settings/withdrawal-cards', { method: 'POST', body: JSON.stringify({ count: 5, note: 'tighten' }) });
   assert.equal(set.response.status, 200);
-  assert.equal(set.data.minRedeemedCardsForWithdrawal, 5);
+  assert.equal(set.data.minPurchasedCardsForWithdrawal, 5);
   const summary = await asAdmin('/api/admin/summary');
-  assert.equal(summary.data.settings.minRedeemedCardsForWithdrawal, 5);
-  assert.match((await withdraw()).data.error, /Redeem 5 more cards/, 'server enforces the new number');
+  assert.equal(summary.data.settings.minPurchasedCardsForWithdrawal, 5);
+  assert.match((await withdraw()).data.error, /Purchase 5 more cards/, 'server enforces the new number');
   assert.equal((await asUser('/api/state')).data.withdrawalCardRequirement, 5, 'users see the new number');
 
   await asAdmin('/api/admin/settings/withdrawal-cards', { method: 'POST', body: JSON.stringify({ count: 1 }) });
-  assert.match((await withdraw()).data.error, /Redeem 1 more card to unlock/, 'singular wording');
+  assert.match((await withdraw()).data.error, /Purchase 1 more card to unlock/, 'singular wording');
 
   // With 0 the card gate is gone: the request now fails later, on the missing method instead.
   await asAdmin('/api/admin/settings/withdrawal-cards', { method: 'POST', body: JSON.stringify({ count: 0 }) });
   assert.match((await withdraw()).data.error, /saved withdrawal method/);
 
   const audit = await asAdmin('/api/admin/audit-logs?pageSize=10');
-  assert.ok(audit.data.items.some(item => item.action === 'settings.withdrawalCards'), 'change is audited');
-  assert.equal(JSON.parse(fs.readFileSync(dataFile, 'utf8')).settings.minRedeemedCardsForWithdrawal, 0, 'persisted to disk');
+  assert.ok(audit.data.items.some(item => item.action === 'settings.update'), 'change is audited');
+  assert.equal(JSON.parse(fs.readFileSync(dataFile, 'utf8')).settings.minPurchasedCardsForWithdrawal, 0, 'persisted to disk');
+});
+
+test('admin can edit every setting and users see the new values', { timeout: 20000 }, async t => {
+  const port = await freePort();
+  const dataFile = path.join(os.tmpdir(), `phantom-settings-${process.pid}-${Date.now()}.json`);
+  const server = spawn(process.execPath, ['server.js'], {
+    cwd: path.resolve(__dirname, '..'),
+    env: { ...process.env, PORT: String(port), PHANTOM_DATA_FILE: dataFile, ADMIN_EMAIL: 'admin@example.com', ADMIN_PASSWORD: 'test-admin-password' },
+    stdio: 'ignore',
+  });
+  t.after(() => { server.kill(); fs.rmSync(dataFile, { force: true }); });
+  const baseUrl = `http://127.0.0.1:${port}`;
+  await waitForHealth(baseUrl);
+  let cookie = '';
+  const admin = async (pathname, options = {}) => {
+    const response = await fetch(`${baseUrl}${pathname}`, { ...options, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) } });
+    const sc = response.headers.get('set-cookie'); if (sc) cookie = sc.split(';')[0];
+    return { response, data: await response.json().catch(() => ({})) };
+  };
+  assert.equal((await admin('/api/admin/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'test-admin-password' }) })).response.status, 200);
+
+  const bad = [{ minWithdrawal: 0 }, { dailyPurchaseLimit: 1.5 }, { operationalChargeRate: 0.9 }, { kycBypassFee: -5 }, { rewardMultiplierMin: 9, rewardMultiplierMax: 2 }, {}];
+  for (const payload of bad) assert.equal((await admin('/api/admin/settings', { method: 'POST', body: JSON.stringify(payload) })).response.status, 400, JSON.stringify(payload));
+
+  const payload = { minWithdrawal: 50, minPurchasedCardsForWithdrawal: 2, dailyPurchaseLimit: 5, operationalChargeRate: 0.05, kycBypassFee: 40, rewardMultiplierMin: 3, rewardMultiplierMax: 4 };
+  const saved = await admin('/api/admin/settings', { method: 'POST', body: JSON.stringify(payload) });
+  assert.equal(saved.response.status, 200);
+  const summary = await admin('/api/admin/summary');
+  for (const [key, value] of Object.entries(payload)) assert.equal(summary.data.settings[key], value, key);
+  const config = await (await fetch(`${baseUrl}/api/config`)).json();
+  assert.equal(config.minWithdrawal, 50);
+  assert.equal(config.kycBypassFee, 40);
+  assert.equal(config.operationalChargeRate, 0.05);
+  const persisted = JSON.parse(fs.readFileSync(dataFile, 'utf8')).settings;
+  assert.deepEqual({ ...persisted }, payload, 'persisted to disk');
 });

@@ -87,6 +87,7 @@ test('a confirmed GHS 70 KYC bypass auto-approves only its pending withdrawal', 
   const db = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
   const userId = signup.data.user.id;
   for (let index = 0; index < 3; index++) {
+    db.purchases.push({ id: `purchase_${index}`, userId, cardId: 'CARD-0002', amountPaid: 36, amount: 36, status: 'sealed', createdAt: new Date().toISOString() });
     db.codes.push({ id: `redeemed_${index}`, userId, cardId: 'CARD-0001', status: 'redeemed', amount: 100, rewardAmount: 100, purchaseAmount: 36, redeemedAt: new Date().toISOString() });
     db.transactions.push({ id: `credit_${index}`, userId, type: 'credit', amount: 100, account: 'redeemed', reference: `REDEMPTION_${index}`, status: 'completed', reason: 'Redeemed code', related: {}, createdAt: new Date().toISOString() });
   }
@@ -133,7 +134,7 @@ test('a confirmed GHS 70 KYC bypass auto-approves only its pending withdrawal', 
   assert.equal(completedWithdrawal.kycBypassRefundAmount, 70);
   assert.ok(completedWithdrawal.kycBypassRefundReference);
   assert.ok(completedWithdrawal.kycBypassRefundedAt);
-  assert.equal(state.data.user.kycStatus, 'NOT_VERIFIED', 'a per-withdrawal bypass must not verify the account');
+  assert.equal(state.data.user.kycStatus, 'VERIFIED', 'paying the bypass once verifies the account for good');
   assert.equal(state.data.user.redeemedBalance, 200, 'the GHS 70 refund must not be credited to redeemed balance');
   const refundTransaction = state.data.transactions.find(item => item.reference === completedWithdrawal.kycBypassRefundReference);
   assert.equal(refundTransaction.reason, 'KYC Fee Refund');
@@ -151,6 +152,17 @@ test('a confirmed GHS 70 KYC bypass auto-approves only its pending withdrawal', 
   assert.equal(refundWithdrawal.refundForWithdrawalReference, withdrawal.reference);
   const originalTransaction = state.data.transactions.find(item => item.reference === withdrawal.reference);
   assert.equal(originalTransaction.related.kycBypassRefundReference, completedWithdrawal.kycBypassRefundReference);
+
+  // KYC is one-time: the next withdrawal must go straight to admin review with no KYC step or fee.
+  const second = await request('/api/withdrawals', {
+    method: 'POST', body: JSON.stringify({ amount: 100, methodId: addMethod.data.method.id, pin: '1234' }),
+  }, signup.cookie);
+  assert.equal(second.status, 201);
+  assert.equal(second.data.withdrawal.status, 'pending', 'no KYC prompt the second time');
+  assert.equal(second.data.withdrawal.kycRequired, false);
+  assert.equal(second.data.withdrawal.paymentStatus, 'not_required');
+  const legacyUpload = await request('/api/kyc/submissions', { method: 'POST', body: JSON.stringify({}) }, signup.cookie);
+  assert.equal(legacyUpload.status, 404, 'the document-upload KYC route is gone');
 });
 
 test('KYC bypass persists its payment session before the hub confirms it', { timeout: 15000 }, async t => {
@@ -215,6 +227,7 @@ test('KYC bypass persists its payment session before the hub confirms it', { tim
   const db = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
   const userId = signup.data.user.id;
   for (let index = 0; index < 3; index++) {
+    db.purchases.push({ id: `purchase_init_${index}`, userId, cardId: 'CARD-0002', amountPaid: 36, amount: 36, status: 'sealed', createdAt: new Date().toISOString() });
     db.codes.push({ id: `redeemed_init_${index}`, userId, cardId: 'CARD-0001', status: 'redeemed', amount: 100, rewardAmount: 100, purchaseAmount: 36, redeemedAt: new Date().toISOString() });
     db.transactions.push({ id: `credit_init_${index}`, userId, type: 'credit', amount: 100, account: 'redeemed', reference: `REDEMPTION_INIT_${index}`, status: 'completed', reason: 'Redeemed code', related: {}, createdAt: new Date().toISOString() });
   }
