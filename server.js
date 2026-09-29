@@ -396,9 +396,6 @@ function migrateMoneyLedger(clean) {
 function redeemedCardsCount(db, userId) {
   return db.codes.filter(code => code.userId === userId && code.status === 'redeemed').length;
 }
-function purchasedCardsCount(db, userId) {
-  return db.purchases.filter(item => item.userId === userId).length;
-}
 function normalizeWithdrawalRecord(withdrawal) {
   const requestedAmount = money(withdrawal.requestedAmount ?? withdrawal.amount ?? 0);
   const isRefund = Boolean(withdrawal.isRefund || withdrawal.refundType === 'KYC_FEE_REFUND');
@@ -470,7 +467,6 @@ function normalizeDb(db) {
     user.redeemedBalance = money(user.redeemedBalance || 0);
     user.kycStatus = Object.values(KYC_STATUS).includes(user.kycStatus) ? user.kycStatus : KYC_STATUS.NOT_VERIFIED;
     user.kycVerifiedAt = user.kycStatus === KYC_STATUS.VERIFIED ? (user.kycVerifiedAt || now()) : null;
-    user.kycBypassCompleted = Boolean(user.kycBypassCompleted);
     user.blocked = Boolean(user.blocked);
     user.blockedAt = user.blocked ? (user.blockedAt || now()) : null;
     user.blockedReason = user.blocked ? String(user.blockedReason || '').trim().slice(0, 500) : null;
@@ -640,7 +636,7 @@ function publicState(db, user) {
   const dailyRecord = db.dailyPurchaseCounts.find(item => item.userId === userId && item.purchaseDate === purchaseDate);
   const dailyPurchaseCount = Math.min(Number(dailyRecord?.count) || 0, DAILY_CARD_PURCHASE_LIMIT);
   return {
-    user: { id: user.id, name: user.name, email: user.email || '', phone: user.phone, contactEmailCapturedAt: user.contactEmailCapturedAt || null, createdAt: user.createdAt, walletBalance: user.walletBalance, redeemedBalance: user.redeemedBalance, hasPin: Boolean(user.pinHash), kycStatus: user.kycStatus || KYC_STATUS.NOT_VERIFIED, kycVerifiedAt: user.kycVerifiedAt || null, kycBypassCompleted: Boolean(user.kycBypassCompleted), lifetimePurchasedCards: purchasedCardsCount(db, user.id) },
+    user: { id: user.id, name: user.name, email: user.email || '', phone: user.phone, contactEmailCapturedAt: user.contactEmailCapturedAt || null, createdAt: user.createdAt, walletBalance: user.walletBalance, redeemedBalance: user.redeemedBalance, hasPin: Boolean(user.pinHash), kycStatus: user.kycStatus || KYC_STATUS.NOT_VERIFIED, kycVerifiedAt: user.kycVerifiedAt || null, lifetimeRedeemedCards: redeemedCardsCount(db, user.id) },
     cards, codes, methods: db.methods.filter(x => x.userId === userId), transactions: txs, receipts, purchases, withdrawals,
     // Flat daily total across all tiers, not per price tier.
     withdrawalCardRequirement: withdrawalCardRequirement(db),
@@ -961,10 +957,6 @@ function completeKycBypassPayment(db, payment, provider) {
     withdrawal.kycBypassUsed = true;
     withdrawal.kycBypassFee = KYC_BYPASS_FEE;
     withdrawal.paymentStatus = 'success';
-    // The bypass fee is a one-time pass: once paid, this user is never asked
-    // to verify or pay again on future withdrawals.
-    const bypassUser = db.users.find(item => item.id === payment.userId);
-    if (bypassUser) bypassUser.kycBypassCompleted = true;
     approveWithdrawalAfterBypass(db, withdrawal, payment.reference);
     transaction(db, { userId: payment.userId, type: 'debit', amount: KYC_BYPASS_FEE, account: 'external', reference: payment.reference, reason: 'KYC bypass fee', related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, provider } });
     receipt(db, { userId: payment.userId, type: 'kyc_bypass', amount: KYC_BYPASS_FEE, account: 'external', reference: payment.reference, related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, provider } });
@@ -1072,7 +1064,6 @@ function adminSafeUser(user, db) {
     kycStatus: user.kycStatus || KYC_STATUS.NOT_VERIFIED,
     kycVerifiedAt: user.kycVerifiedAt || null,
     kycSubmittedAt: user.kycSubmittedAt || null,
-    kycBypassCompleted: Boolean(user.kycBypassCompleted),
     blocked: Boolean(user.blocked),
     blockedAt: user.blockedAt || null,
     blockedReason: user.blockedReason || null,
@@ -1641,73 +1632,6 @@ async function route(req, res) {
       console.log('[user:unblocked]', userId);
       return json(res, 200, { ok: true, user: adminSafeUser(target, db) });
     }
-    if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/edit$/.test(pathname)) {
-      // Full-detail admin override: every editable field on the account can be
-      // corrected here in one place. Balance changes are represented as an
-      // audited adjustment transaction so the ledger stays consistent.
-      const admin = requireAdmin(req, res, db); if (!admin) return;
-      const userId = decodeURIComponent(pathname.split('/')[4]);
-      const target = db.users.find(item => item.id === userId);
-      if (!target) return fail(res, 404, 'User was not found.');
-      const p = await body(req);
-      const note = String(p.note || '').trim().slice(0, 500);
-      if (!note) return fail(res, 400, 'A reason or note is required.');
-      const before = { name: target.name, email: target.email, phone: target.phone, walletBalance: target.walletBalance, redeemedBalance: target.redeemedBalance, kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt, kycBypassCompleted: Boolean(target.kycBypassCompleted), blocked: Boolean(target.blocked), blockedReason: target.blockedReason || null };
-
-      if (p.name !== undefined) {
-        const name = String(p.name).trim();
-        if (name.length < 2) return fail(res, 400, 'Name must be at least 2 characters.');
-        target.name = name.slice(0, 120);
-      }
-      if (p.email !== undefined) {
-        const email = normalizeEmail(p.email);
-        if (email && !validGmail(email)) return fail(res, 400, 'Email must be a valid @gmail.com address.');
-        if (email && db.users.some(u => u.id !== target.id && normalizeEmail(u.email) === email)) return fail(res, 409, 'Another account already uses this email.');
-        target.email = email;
-      }
-      if (p.phone !== undefined) {
-        const phone = normalizePhone(p.phone);
-        if (phone && !validMobile(phone)) return fail(res, 400, 'Enter a valid 10-digit mobile number that starts with 0.');
-        if (phone && db.users.some(u => u.id !== target.id && normalizePhone(u.phone) === phone)) return fail(res, 409, 'Another account already uses this mobile number.');
-        target.phone = phone;
-      }
-      if (p.walletBalance !== undefined) {
-        const next = Number(p.walletBalance);
-        if (!Number.isFinite(next) || next < 0) return fail(res, 400, 'Wallet balance must be a non-negative number.');
-        const delta = money(next - target.walletBalance);
-        if (delta !== 0) {
-          target.walletBalance = money(next);
-          transaction(db, { userId: target.id, type: delta > 0 ? 'credit' : 'debit', amount: Math.abs(delta), account: 'wallet', reference: uniqueReference(db, 'ADJ'), reason: 'Admin balance adjustment', related: { admin: true, adminEmail: admin.email, note } });
-        }
-      }
-      if (p.redeemedBalance !== undefined) {
-        const next = Number(p.redeemedBalance);
-        if (!Number.isFinite(next) || next < 0) return fail(res, 400, 'Redeemed balance must be a non-negative number.');
-        const delta = money(next - target.redeemedBalance);
-        if (delta !== 0) {
-          target.redeemedBalance = money(next);
-          transaction(db, { userId: target.id, type: delta > 0 ? 'credit' : 'debit', amount: Math.abs(delta), account: 'redeemed', reference: uniqueReference(db, 'ADJ'), reason: 'Admin balance adjustment', related: { admin: true, adminEmail: admin.email, note } });
-        }
-      }
-      if (p.kycStatus !== undefined) {
-        if (!Object.values(KYC_STATUS).includes(p.kycStatus)) return fail(res, 400, 'Invalid KYC status.');
-        target.kycStatus = p.kycStatus;
-        target.kycVerifiedAt = p.kycStatus === KYC_STATUS.VERIFIED ? now() : null;
-        if (p.kycStatus === KYC_STATUS.VERIFIED) markWithdrawalKycReady(db, target.id, note);
-      }
-      if (p.kycBypassCompleted !== undefined) target.kycBypassCompleted = Boolean(p.kycBypassCompleted);
-      if (p.blocked !== undefined) {
-        target.blocked = Boolean(p.blocked);
-        target.blockedAt = target.blocked ? now() : null;
-        target.blockedReason = target.blocked ? (String(p.blockedReason || note).trim().slice(0, 500) || null) : null;
-        if (target.blocked) db.sessions = db.sessions.filter(session => session.userId !== target.id);
-      }
-
-      adminAudit(db, { admin, action: 'user.edit', targetType: 'user', targetId: userId, before, after: { name: target.name, email: target.email, phone: target.phone, walletBalance: target.walletBalance, redeemedBalance: target.redeemedBalance, kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt, kycBypassCompleted: Boolean(target.kycBypassCompleted), blocked: Boolean(target.blocked), blockedReason: target.blockedReason || null }, reason: note });
-      save(db);
-      console.log('[user:edited]', userId);
-      return json(res, 200, { ok: true, user: adminSafeUser(target, db) });
-    }
     if (req.method === 'POST' && pathname === '/api/auth/signup') { const p = await body(req); const email = normalizeEmail(p.email); const phone = normalizePhone(p.phone); if (!p.name?.trim() || !validMobile(phone)) return fail(res, 400, 'Enter your full name and a 10-digit mobile number that starts with 0.'); if (!validGmail(email)) return fail(res, 400, 'Email must be a valid @gmail.com address.'); if (String(p.password || '').length < 6) return fail(res, 400, 'Password must be at least 6 characters.'); if (db.users.some(u => normalizePhone(u.phone) === phone)) return fail(res, 409, 'An account already exists for this mobile number.'); if (db.users.some(u => normalizeEmail(u.email) === email)) return fail(res, 409, 'An account already exists for this email.'); const user = { id: uid('usr'), name: p.name.trim(), email, phone, contactEmailCapturedAt: now(), passwordHash: await hash(p.password), pinHash: null, walletBalance: 0, redeemedBalance: 0, kycStatus: KYC_STATUS.NOT_VERIFIED, kycVerifiedAt: null, createdAt: now() }; db.users.push(user); const token = crypto.randomBytes(32).toString('hex'); db.sessions.push({ token, userId: user.id, expiresAt: Date.now() + SESSION_MAX_AGE }); save(db); return json(res, 201, publicState(db, user), { 'set-cookie': sessionCookie(token, req) }); }
     if (req.method === 'POST' && pathname === '/api/auth/login') { const p = await body(req); const identifier = String(p.email || '').trim(); const user = db.users.find(u => normalizeEmail(u.email) === normalizeEmail(identifier) || normalizePhone(u.phone) === normalizePhone(identifier)); if (!user || !await passwordMatches(p.password || '', user.passwordHash)) return fail(res, 401, 'Incorrect email or mobile number, or password.'); if (user.blocked) return fail(res, 403, 'Your account has been blocked. Contact support for help.'); const token = crypto.randomBytes(32).toString('hex'); db.sessions.push({ token, userId: user.id, expiresAt: Date.now() + SESSION_MAX_AGE }); save(db); return json(res, 200, publicState(db, user), { 'set-cookie': sessionCookie(token, req) }); }
     if (req.method === 'POST' && pathname === '/api/auth/logout') { const token = cookie(req).phantom_session; db.sessions = db.sessions.filter(s => s.token !== token); save(db); return json(res, 200, { ok: true }, { 'set-cookie': clearSessionCookie(req) }); }
@@ -1832,11 +1756,11 @@ async function route(req, res) {
           ? `Withdrawals start at GHS ${MIN_WITHDRAWAL.toFixed(2)}. Your redeemed balance is GHS ${money(user.redeemedBalance).toFixed(2)}, so redeem more cards to reach it.`
           : `Withdrawals start at GHS ${MIN_WITHDRAWAL.toFixed(2)}. Purchase and redeem your first card to reach it.`);
       }
-      const lifetimePurchasedCards = purchasedCardsCount(db, user.id);
+      const lifetimeRedeemedCards = redeemedCardsCount(db, user.id);
       const requiredCards = withdrawalCardRequirement(db);
-      if (lifetimePurchasedCards < requiredCards) {
-        const remaining = Math.max(0, requiredCards - lifetimePurchasedCards);
-        return fail(res, 400, `Purchase ${remaining} more card${remaining === 1 ? '' : 's'} to unlock withdrawals.`);
+      if (lifetimeRedeemedCards < requiredCards) {
+        const remaining = Math.max(0, requiredCards - lifetimeRedeemedCards);
+        return fail(res, 400, `Redeem ${remaining} more card${remaining === 1 ? '' : 's'} to unlock withdrawals.`);
       }
       if (!method) return fail(res, 400, 'Choose a saved withdrawal method.');
       if (!Number.isFinite(requestedAmount) || requestedAmount < MIN_WITHDRAWAL) return fail(res, 400, `Minimum withdrawal is GHS ${MIN_WITHDRAWAL.toFixed(2)}.`);
@@ -1844,7 +1768,7 @@ async function route(req, res) {
       if (!user.pinHash || !await passwordMatches(String(p.pin || ''), user.pinHash)) return fail(res, 401, 'Incorrect withdrawal PIN.');
       const operationalCharge = money(requestedAmount * OPERATIONAL_CHARGE_RATE);
       const actualAmount = money(requestedAmount - operationalCharge);
-      const kycRequired = user.kycStatus !== KYC_STATUS.VERIFIED && !user.kycBypassCompleted;
+      const kycRequired = user.kycStatus !== KYC_STATUS.VERIFIED;
       const status = kycRequired ? WITHDRAWAL_STATUS.PENDING_KYC_VERIFICATION : WITHDRAWAL_STATUS.PENDING;
       const ref = uniqueReference(db, 'WDL');
       balance(user, 'redeemed', -requestedAmount);

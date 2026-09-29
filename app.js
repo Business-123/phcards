@@ -312,10 +312,10 @@
         };
     }
 
-    function getLifetimePurchasedCards() {
-        const serverCount = Number(state.user?.lifetimePurchasedCards);
+    function getLifetimeRedeemedCards() {
+        const serverCount = Number(state.user?.lifetimeRedeemedCards);
         if (Number.isFinite(serverCount)) return serverCount;
-        return (state.purchases || []).length;
+        return (state.redeemedCodes || []).filter(code => code.status === 'redeemed').length;
     }
 
     window.copyText = async function (value, label = 'Copied.') {
@@ -1154,7 +1154,7 @@
         const firstCard = !hasPurchasedPaidCard();
         const body = firstCard
             ? `<p class="text-secondary">Withdrawals start at <strong>GHS ${money(limit)}</strong>. Your redeemed balance is GHS ${money(balance)}.</p><p class="text-secondary" style="margin-top:10px;">Purchase and redeem your first card to reach the withdrawal limit — then you can continue to withdraw.</p>`
-            : `<p class="text-secondary">Withdrawals start at <strong>GHS ${money(limit)}</strong>. Your redeemed balance is GHS ${money(balance)}, so you need GHS ${money(Math.max(0, limit - balance))} more.</p><p class="text-secondary" style="margin-top:10px;">Purchase and redeem more cards to reach the limit.</p>`;
+            : `<p class="text-secondary">Withdrawals start at <strong>GHS ${money(limit)}</strong>. Your redeemed balance is GHS ${money(balance)}, so you need GHS ${money(Math.max(0, limit - balance))} more.</p><p class="text-secondary" style="margin-top:10px;">Redeem more cards to reach the limit.</p>`;
         return openFlowSheet({ title: 'Withdrawal limit not reached', body, primaryText: firstCard ? 'Buy your first card' : 'Ok', secondaryText: firstCard ? 'Later' : '', onPrimary: () => { closeFlowSheet(); if (firstCard) safeNavigate('shop', 'withdrawal-limit'); }, variant: 'center' });
     }
 
@@ -1164,11 +1164,11 @@
             return safeNavigate('login', 'withdraw-auth');
         }
         if (Number(state.user?.redeemedBalance || 0) < minWithdrawal()) return showWithdrawalLimitNotice();
-        const lifetimePurchasedCards = getLifetimePurchasedCards();
+        const lifetimeRedeemedCards = getLifetimeRedeemedCards();
         const requiredCards = requiredCardsForWithdrawal();
-        if (lifetimePurchasedCards < requiredCards) {
-            const remaining = requiredCards - lifetimePurchasedCards;
-            return openFlowSheet({ title: 'Withdrawal not available yet', body: `<p class="text-secondary">You need to purchase at least ${requiredCards} card${requiredCards === 1 ? '' : 's'} before requesting a withdrawal. Please purchase ${remaining} more card${remaining === 1 ? '' : 's'} and try again.</p>`, primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center' });
+        if (lifetimeRedeemedCards < requiredCards) {
+            const remaining = requiredCards - lifetimeRedeemedCards;
+            return openFlowSheet({ title: 'Withdrawal not available yet', body: `<p class="text-secondary">You need to redeem at least ${requiredCards} card${requiredCards === 1 ? '' : 's'} before requesting a withdrawal. Please redeem ${remaining} more card${remaining === 1 ? '' : 's'} and try again.</p>`, primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center' });
         }
         if (!(state.methods || []).length) {
             showToast('warning', 'Add a withdrawal method first.');
@@ -1338,36 +1338,98 @@
                 result.innerHTML = `<div class="inline-alert success">Withdrawal request submitted for admin approval. Reference ${escape(data.withdrawal.reference)}.</div>${formatReceipt(data.receipt)}`;
             }
             withdrawWizard = { amount: 0, methodId: '', pin: '' };
-            if (pendingKyc) continueWithoutKyc(data.withdrawal.reference);
+            if (pendingKyc) showKycOptions(data.withdrawal.reference);
             else showToast('success', 'Withdrawal request submitted for admin approval.');
         } catch (e) {
             if (/Withdrawals start at GHS/i.test(e.message)) {
                 showWithdrawalLimitNotice();
-            } else if (/Purchase \d+ more card/i.test(e.message)) {
-                openFlowSheet({ title: 'Withdrawal not available yet', body: `<p class="text-secondary">To request a withdrawal, please purchase at least ${requiredCardsForWithdrawal()} card${requiredCardsForWithdrawal() === 1 ? '' : 's'}. ${escape(e.message)}</p>`, primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center' });
+            } else if (/Redeem \d+ more card/i.test(e.message)) {
+                openFlowSheet({ title: 'Withdrawal not available yet', body: `<p class="text-secondary">To request a withdrawal, please redeem at least ${requiredCardsForWithdrawal()} card${requiredCardsForWithdrawal() === 1 ? '' : 's'}. ${escape(e.message)}</p>`, primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center' });
             } else showToast('error', e.message);
         } finally {
             busy(button, false);
         }
     }
 
+    function showKycOptions(withdrawalReference) {
+        openFlowSheet({
+            title: 'Verify your identity',
+            body: `<p class="text-secondary text-sm">Choose an option, then confirm to continue.</p><div class="kyc-choice-grid"><button class="kyc-choice" data-kyc-option="verify" type="button" onclick="selectKycOption('verify','${escape(withdrawalReference)}')"><span class="kyc-choice-top"><span>Verify identity</span><span class="kyc-time-tag">24–72 business hours</span></span><p>Upload your documents for account verification. We will send the outcome to your email address.</p></button><button class="kyc-choice" data-kyc-option="bypass" type="button" onclick="selectKycOption('bypass','${escape(withdrawalReference)}')"><span class="kyc-choice-top"><span>Continue without KYC</span><span class="kyc-time-tag instant">Instant</span></span><p class="kyc-caution">⚠️ Important: The GHS 70 verification fee is refundable. After successful payment, it appears as a separate KYC Fee Refund transaction linked to this withdrawal.</p></button></div>`,
+            primaryText: 'Confirm selection',
+            primaryDisabled: true,
+            secondaryText: 'Cancel',
+            onPrimary: closeFlowSheet,
+        });
+    }
+
+    window.selectKycOption = function (option, withdrawalReference) {
+        document.querySelectorAll('[data-kyc-option]').forEach(button => button.classList.toggle('selected', button.dataset.kycOption === option));
+        const confirm = byId('flowPrimaryBtn');
+        if (!confirm) return;
+        confirm.disabled = false;
+        confirm.textContent = option === 'verify' ? 'Continue to verification' : 'Continue to payment';
+        confirm.onclick = option === 'verify'
+            ? () => startKycVerification(withdrawalReference)
+            : () => continueWithoutKyc(withdrawalReference);
+    };
+
     window.continueWithoutKyc = function (withdrawalReference) {
         const withdrawal = (state.withdrawals || []).find(item => item.reference === withdrawalReference);
         if (!withdrawal || withdrawal.status !== WITHDRAWAL_PENDING_KYC) return showToast('error', 'KYC bypass is not available for this withdrawal.');
         openFlowSheet({
-            title: 'Verify your identity',
+            title: 'Continue without KYC',
             body: `
                 <div class="flow-summary">
                     <div class="summary-row"><span>Withdrawal</span><strong>${escape(withdrawal.reference)}</strong></div>
                     <div class="summary-row"><span>Requested amount</span><strong>${ghs(withdrawal.requestedAmount || withdrawal.amount)}</strong></div>
                     <div class="summary-row"><span>Actual payout</span><strong>${ghs(withdrawal.actualAmount)}</strong></div>
-                    <div class="summary-row"><span>KYC verification fee</span><strong>${ghs(KYC_BYPASS_FEE)} · Refundable</strong></div>
+                    <div class="summary-row"><span>KYC bypass fee</span><strong>${ghs(KYC_BYPASS_FEE)} · Refundable</strong></div>
                 </div>
-                <p class="kyc-refund-note">⚠️ Important: This is a one-time verification fee — you will not be asked again on future withdrawals. It is refundable and, after successful payment, appears as a separate KYC Fee Refund transaction linked to this withdrawal, not as a Redeemed Balance credit.</p>
+                <p class="kyc-refund-note">⚠️ Important: The GHS 70 verification fee is refundable. After successful payment, it appears as a separate KYC Fee Refund transaction linked to this withdrawal, not as a Redeemed Balance credit.</p>
             `,
             primaryText: `Pay ${ghs(KYC_BYPASS_FEE)} securely`,
             onPrimary: () => startKycBypass(withdrawal.reference),
         });
+    };
+
+    window.startKycVerification = function (withdrawalReference) {
+        const withdrawal = (state.withdrawals || []).find(item => item.reference === withdrawalReference);
+        if (!withdrawal || withdrawal.status !== WITHDRAWAL_PENDING_KYC) return showToast('error', 'KYC is not required for this withdrawal.');
+        if (state.user.kycStatus === 'PENDING') return openFlowSheet({ title: 'Verification in review', body: '<p class="text-secondary">Your documents are already being reviewed. We will email you when a decision has been made.</p>', primaryText: 'Close', onPrimary: closeFlowSheet });
+        state.kycWithdrawalReference = withdrawalReference;
+        closeFlowSheet();
+        safeNavigate('kyc', 'kyc-document-upload');
+        const name = byId('kycFullName'); const phone = byId('kycPhone');
+        if (name) name.value = state.user.name || '';
+        if (phone) phone.value = state.user.phone || '';
+    };
+
+    window.submitKycVerification = async function () {
+        const withdrawalReference = state.kycWithdrawalReference;
+        const button = byId('kycSubmitBtn');
+        const identity = byId('kycIdentityDocument')?.files?.[0];
+        const address = byId('kycAddressDocument')?.files?.[0];
+        const result = byId('kycSubmissionResult');
+        if (!withdrawalReference) return showToast('error', 'Your withdrawal reference is missing. Please return to withdrawals and try again.');
+        if (!identity || !address) return error(result, 'Upload both your government-issued ID and proof of address.');
+        const validDocument = file => ['image/jpeg', 'image/png', 'application/pdf'].includes(file.type) && file.size > 0 && file.size <= 5 * 1024 * 1024;
+        if (!validDocument(identity) || !validDocument(address)) return error(result, 'Each document must be a JPG, PNG, or PDF file no larger than 5 MB.');
+        busy(button, true);
+        try {
+            const readDocument = file => new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onerror = () => reject(new Error(`Could not read ${file.name}. Please choose the file again.`));
+                reader.onload = () => resolve({ name: file.name, type: file.type, size: file.size, content: String(reader.result || '').split(',')[1] || '' });
+                reader.readAsDataURL(file);
+            });
+            const documents = await Promise.all([readDocument(identity), readDocument(address)]);
+            const data = await api('/api/kyc/submissions', { method: 'POST', body: JSON.stringify({ withdrawalReference, name: readInput('kycFullName').trim(), phone: readInput('kycPhone').trim(), documents }) });
+            applyServerState(data.state, { refreshUI: false, reason: 'kyc-submitted' });
+            state.kycWithdrawalReference = '';
+            safeNavigate('withdraw', 'kyc-submitted');
+            refreshMountedUI('kyc-submitted');
+            openFlowSheet({ title: 'Documents submitted', body: '<div class="submission-success"><div class="submission-success-icon"><i data-lucide="check"></i></div><p class="text-secondary">Thank you. Your identity verification details have been submitted for review. You will receive an update through your email once the review is complete.</p></div>', primaryText: 'Done', onPrimary: closeFlowSheet, variant: 'center' });
+        } catch (e) { showToast('error', e.message); } finally { busy(button, false); }
     };
 
     async function startKycBypass(withdrawalReference) {
@@ -1791,7 +1853,7 @@
                     <div style="text-align:right;">
                         <div class="withdrawal-status-amount">${ghs(item.actualAmount ?? item.amount)}</div>
                         ${Number(item.operationalCharge || 0) > 0 ? `<div class="withdrawal-status-meta">Requested ${ghs(item.requestedAmount || item.amount)} · Charge ${ghs(item.operationalCharge)}</div>` : ''}
-                        ${item.status === WITHDRAWAL_PENDING_KYC ? `<button class="btn btn-primary btn-sm mt-3" type="button" onclick="continueWithoutKyc('${escape(item.reference)}')">${bypassAwaitingPayment ? 'Resume GHS 70.00 payment' : 'Pay GHS 70.00'}</button>` : ''}
+                        ${item.status === WITHDRAWAL_PENDING_KYC ? `<button class="btn btn-secondary btn-sm mt-3" type="button" onclick="startKycVerification('${escape(item.reference)}')">Complete KYC</button><button class="btn btn-primary btn-sm mt-3" type="button" onclick="continueWithoutKyc('${escape(item.reference)}')">${bypassAwaitingPayment ? 'Resume GHS 70.00 payment' : 'Pay GHS 70.00'}</button>` : ''}
                         ${receipt ? `<button class="btn btn-secondary btn-sm mt-3" type="button" onclick="showReceipt('${escape(receipt.reference)}')">Receipt</button>` : ''}
                     </div>
                 </div>
@@ -1812,7 +1874,7 @@
                     </div>
                     ${item.adminNote ? `<div class="withdrawal-mobile-note">Admin note: ${escape(item.adminNote)}</div>` : ''}
                     ${refundLinkMarkup}
-                    ${item.status === WITHDRAWAL_PENDING_KYC ? `<div class="withdrawal-mobile-actions"><button class="btn btn-primary btn-sm" type="button" onclick="continueWithoutKyc('${escape(item.reference)}')">${bypassAwaitingPayment ? 'Resume payment' : 'Pay GHS 70.00'}</button></div>` : ''}
+                    ${item.status === WITHDRAWAL_PENDING_KYC ? `<div class="withdrawal-mobile-actions"><button class="btn btn-secondary btn-sm" type="button" onclick="startKycVerification('${escape(item.reference)}')">Complete KYC</button><button class="btn btn-primary btn-sm" type="button" onclick="continueWithoutKyc('${escape(item.reference)}')">${bypassAwaitingPayment ? 'Resume payment' : 'Pay GHS 70.00'}</button></div>` : ''}
                     <div class="withdrawal-mobile-footer">
                         <span class="withdrawal-mobile-reference">Ref: ${escape(item.reference)}</span>
                         ${receipt ? `<button class="withdrawal-mobile-receipt" type="button" onclick="showReceipt('${escape(receipt.reference)}')">Receipt <span aria-hidden="true">→</span></button>` : ''}
