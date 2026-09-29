@@ -93,22 +93,33 @@ test('a confirmed GHS 70 KYC bypass auto-approves only its pending withdrawal', 
   }
   fs.writeFileSync(dataFile, JSON.stringify(db));
 
+  const before = await request('/api/state', {}, signup.cookie);
+  assert.equal(before.data.user.redeemedBalance, 300);
+
+  // Unverified user: the request goes straight to the KYC payment. Nothing is deducted
+  // and no withdrawal (pending or otherwise) is created until the fee is paid.
   const withdrawalResult = await request('/api/withdrawals', {
-    method: 'POST', body: JSON.stringify({ amount: 100, methodId: addMethod.data.method.id, pin: '1234' }),
+    method: 'POST', body: JSON.stringify({ amount: 100, methodId: addMethod.data.method.id, pin: '1234', returnOrigin: `http://127.0.0.1:${port}` }),
   }, signup.cookie);
   assert.equal(withdrawalResult.status, 201);
-  assert.equal(withdrawalResult.data.withdrawal.status, 'PENDING_KYC_VERIFICATION');
-  assert.equal(withdrawalResult.data.withdrawal.operationalCharge, 10);
-  assert.equal(withdrawalResult.data.withdrawal.actualAmount, 90);
+  assert.equal(withdrawalResult.data.kycRequired, true);
+  assert.ok(withdrawalResult.data.checkoutUrl);
+  assert.equal(withdrawalResult.data.withdrawal, undefined, 'no withdrawal is created before the KYC fee is paid');
+  assert.equal(withdrawalResult.data.state.user.redeemedBalance, 300, 'balance is not deducted before the KYC fee is paid');
 
-  const afterWithdrawal = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
-  const withdrawal = afterWithdrawal.withdrawals.find(item => item.reference === withdrawalResult.data.withdrawal.reference);
+  const unpaid = await request('/api/state', {}, signup.cookie);
+  assert.equal(unpaid.data.user.redeemedBalance, 300);
+  assert.equal(unpaid.data.withdrawals.length, 0, 'nothing shows in withdrawal history');
+  assert.equal(unpaid.data.transactions.some(item => /Withdrawal/.test(item.reason)), false);
 
-  const initialized = await request(`/api/withdrawals/${encodeURIComponent(withdrawal.reference)}/kyc-bypass`, {
-    method: 'POST', body: JSON.stringify({ returnOrigin: `http://127.0.0.1:${port}` }),
+  // Retrying while the checkout is still live reuses it instead of creating another.
+  const retry = await request('/api/withdrawals', {
+    method: 'POST', body: JSON.stringify({ amount: 100, methodId: addMethod.data.method.id, pin: '1234', returnOrigin: `http://127.0.0.1:${port}` }),
   }, signup.cookie);
-  assert.equal(initialized.status, 201);
-  const payment = JSON.parse(fs.readFileSync(dataFile, 'utf8')).kycBypassPayments.find(item => item.withdrawalId === withdrawal.id);
+  assert.equal(retry.data.checkoutUrl, withdrawalResult.data.checkoutUrl);
+  const payments = JSON.parse(fs.readFileSync(dataFile, 'utf8')).kycBypassPayments;
+  assert.equal(payments.length, 1);
+  const payment = payments[0];
   assert.equal(payment.status, 'PAYMENT_INITIALIZED');
   assert.equal(payment.paystackReference, 'PCS_TEST_PAYMENT_0001');
 
@@ -126,8 +137,11 @@ test('a confirmed GHS 70 KYC bypass auto-approves only its pending withdrawal', 
   assert.equal(confirmed.status, 200);
 
   const state = await request('/api/state', {}, signup.cookie);
-  const completedWithdrawal = state.data.withdrawals.find(item => item.reference === withdrawal.reference);
+  const completedWithdrawal = state.data.withdrawals.find(item => !item.isRefund);
+  const withdrawal = completedWithdrawal;
   assert.equal(completedWithdrawal.status, 'approved');
+  assert.equal(completedWithdrawal.operationalCharge, 10);
+  assert.equal(completedWithdrawal.actualAmount, 90);
   assert.equal(completedWithdrawal.kycBypassUsed, true);
   assert.equal(completedWithdrawal.kycBypassFee, 70);
   assert.equal(completedWithdrawal.kycBypassRefunded, true);
@@ -135,7 +149,7 @@ test('a confirmed GHS 70 KYC bypass auto-approves only its pending withdrawal', 
   assert.ok(completedWithdrawal.kycBypassRefundReference);
   assert.ok(completedWithdrawal.kycBypassRefundedAt);
   assert.equal(state.data.user.kycStatus, 'VERIFIED', 'paying the bypass once verifies the account for good');
-  assert.equal(state.data.user.redeemedBalance, 200, 'the GHS 70 refund must not be credited to redeemed balance');
+  assert.equal(state.data.user.redeemedBalance, 200, 'the withdrawal is deducted only after payment, and the GHS 70 refund is not credited to redeemed balance');
   const refundTransaction = state.data.transactions.find(item => item.reference === completedWithdrawal.kycBypassRefundReference);
   assert.equal(refundTransaction.reason, 'KYC Fee Refund');
   assert.equal(refundTransaction.type, 'credit');
@@ -233,14 +247,11 @@ test('KYC bypass persists its payment session before the hub confirms it', { tim
   }
   fs.writeFileSync(dataFile, JSON.stringify(db));
 
-  const withdrawal = await request('/api/withdrawals', {
-    method: 'POST', body: JSON.stringify({ amount: 100, methodId: addMethod.data.method.id, pin: '1234' }),
-  }, signup.cookie);
-  assert.equal(withdrawal.status, 201);
-  const initialized = await request(`/api/withdrawals/${encodeURIComponent(withdrawal.data.withdrawal.reference)}/kyc-bypass`, {
-    method: 'POST', body: JSON.stringify({ returnOrigin: baseUrl }),
+  const initialized = await request('/api/withdrawals', {
+    method: 'POST', body: JSON.stringify({ amount: 100, methodId: addMethod.data.method.id, pin: '1234', returnOrigin: baseUrl }),
   }, signup.cookie);
   assert.equal(initialized.status, 201);
+  assert.equal(initialized.data.kycRequired, true);
   assert.equal(initialized.data.amount, 70);
   assert.equal(initializePayload.amount, 70);
   assert.equal(initializePayload.currency, 'GHS');
@@ -249,4 +260,5 @@ test('KYC bypass persists its payment session before the hub confirms it', { tim
   const saved = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
   assert.equal(saved.kycBypassPayments[0].status, 'PAYMENT_INITIALIZED');
   assert.equal(saved.kycBypassPayments[0].amount, 70);
+  assert.equal(saved.withdrawals.length, 0, 'no withdrawal is created until the fee is paid');
 });

@@ -1006,9 +1006,52 @@ function markWithdrawalKycReady(db, userId, adminNote = '') {
   });
   return withdrawals;
 }
+// The withdrawal is only created (and the balance only deducted) once the KYC fee
+// is confirmed as paid. Returns null if the request can no longer be honoured
+// (e.g. the user spent their redeemed balance while the checkout was open).
+function createWithdrawalFromKycPayment(db, payment) {
+  const intent = payment.withdrawalIntent;
+  const user = db.users.find(item => item.id === payment.userId);
+  if (!intent || !user) return null;
+  const method = db.methods.find(item => item.id === intent.methodId && item.userId === user.id);
+  if (!method || Number(user.redeemedBalance) < Number(intent.requestedAmount)) return null;
+  const ref = uniqueReference(db, 'WDL');
+  balance(user, 'redeemed', -intent.requestedAmount);
+  const withdrawal = normalizeWithdrawalRecord({ id: uid('wdl'), userId: user.id, methodId: method.id, amount: intent.requestedAmount, requestedAmount: intent.requestedAmount, operationalCharge: intent.operationalCharge, actualAmount: intent.actualAmount, reference: ref, status: WITHDRAWAL_STATUS.PENDING, kycRequired: true, kycBypassUsed: false, kycBypassFee: 0, paymentStatus: 'success', createdAt: now(), approvedAt: null, completedAt: null });
+  db.withdrawals.push(withdrawal);
+  const related = { withdrawalId: withdrawal.id, methodId: method.id, payoutStatus: WITHDRAWAL_STATUS.PENDING, requestedAmount: intent.requestedAmount, operationalCharge: intent.operationalCharge, actualAmount: intent.actualAmount, kycRequired: true, kycBypassUsed: false };
+  transaction(db, { userId: user.id, type: 'debit', amount: intent.requestedAmount, account: 'redeemed', reference: ref, status: WITHDRAWAL_STATUS.PENDING, reason: `Withdrawal to ${method.network}`, related });
+  receipt(db, { userId: user.id, type: 'withdrawal', amount: intent.requestedAmount, account: 'redeemed', reference: ref, status: WITHDRAWAL_STATUS.PENDING, related });
+  payment.withdrawalId = withdrawal.id;
+  payment.withdrawalReference = withdrawal.reference;
+  return withdrawal;
+}
+// Fee was paid but the withdrawal can't be created: verify the user, record the fee
+// and refund it in full, and leave the balance untouched.
+function completeKycPaymentWithoutWithdrawal(db, payment, provider) {
+  payment.status = 'success'; payment.verifiedAt = now(); payment.provider = provider; payment.withdrawalSkipped = true;
+  const fee = money(payment.amount);
+  const payer = db.users.find(item => item.id === payment.userId);
+  if (payer) { payer.kycStatus = KYC_STATUS.VERIFIED; payer.kycVerifiedAt = payer.kycVerifiedAt || now(); payer.kycVerifiedVia = 'bypass'; markWithdrawalKycReady(db, payer.id); }
+  transaction(db, { userId: payment.userId, type: 'debit', amount: fee, account: 'external', reference: payment.reference, reason: 'KYC bypass fee', related: { provider } });
+  receipt(db, { userId: payment.userId, type: 'kyc_bypass', amount: fee, account: 'external', reference: payment.reference, related: { provider } });
+  const refundReference = uniqueReference(db, 'REF');
+  const refundedAt = now();
+  db.withdrawals.push(normalizeWithdrawalRecord({ id: uid('wdl_refund'), userId: payment.userId, methodId: payment.withdrawalIntent?.methodId || null, amount: fee, requestedAmount: fee, operationalCharge: 0, actualAmount: fee, reference: refundReference, status: 'refunded', isRefund: true, refundType: 'KYC_FEE_REFUND', refundedAt, createdAt: refundedAt }));
+  transaction(db, { userId: payment.userId, type: 'credit', entryType: 'REFUND', amount: fee, account: 'external', reference: refundReference, status: 'refunded', reason: 'KYC Fee Refund', related: { originalPaymentReference: payment.reference, refund: true, transactionType: 'REFUND', refundType: 'KYC_FEE_REFUND', provider } });
+  receipt(db, { userId: payment.userId, type: 'kyc_bypass_refund', amount: fee, account: 'external', reference: refundReference, status: 'refunded', related: { originalPaymentReference: payment.reference, refund: true, transactionType: 'REFUND', refundType: 'KYC_FEE_REFUND', provider } });
+  return { withdrawal: null, receipt: db.receipts.find(r => r.reference === payment.reference) };
+}
 function completeKycBypassPayment(db, payment, provider) {
-  const withdrawal = db.withdrawals.find(item => item.id === payment.withdrawalId && item.userId === payment.userId);
-  if (!withdrawal) throw new Error('Withdrawal was not found.');
+  let withdrawal = db.withdrawals.find(item => item.id === payment.withdrawalId && item.userId === payment.userId);
+  if (!withdrawal && payment.status !== 'success' && payment.withdrawalIntent) {
+    withdrawal = createWithdrawalFromKycPayment(db, payment);
+    if (!withdrawal) return completeKycPaymentWithoutWithdrawal(db, payment, provider);
+  }
+  if (!withdrawal) {
+    if (payment.status === 'success') return { withdrawal: null, receipt: db.receipts.find(r => r.reference === payment.reference) };
+    throw new Error('Withdrawal was not found.');
+  }
   normalizeWithdrawalRecord(withdrawal);
   const fee = money(payment.amount);
   if (payment.status !== 'success') {
@@ -1911,16 +1954,39 @@ async function route(req, res) {
       const operationalCharge = money(requestedAmount * OPERATIONAL_CHARGE_RATE);
       const actualAmount = money(requestedAmount - operationalCharge);
       const kycRequired = user.kycStatus !== KYC_STATUS.VERIFIED;
-      const status = kycRequired ? WITHDRAWAL_STATUS.PENDING_KYC_VERIFICATION : WITHDRAWAL_STATUS.PENDING;
+      if (kycRequired) {
+        // KYC fee not paid yet: do NOT deduct the balance and do NOT create a withdrawal
+        // (so nothing shows as pending). We only remember the request on the payment
+        // record; the withdrawal is created after the KYC fee is confirmed as paid.
+        if (!HUB_BASE_URL || !HUB_API_KEY || !HUB_API_SECRET) return fail(res, 503, 'Secure KYC payment checkout is not configured.');
+        const preview = { requestedAmount, operationalCharge, actualAmount };
+        const intent = { methodId: method.id, ...preview };
+        const reusable = db.kycBypassPayments.find(item => !item.withdrawalId && item.userId === user.id && item.status === 'PAYMENT_INITIALIZED' && item.authorizationUrl && Number(item.amount) === KYC_BYPASS_FEE && new Date(item.expiresAt).getTime() > Date.now() && item.withdrawalIntent?.methodId === method.id && Number(item.withdrawalIntent?.requestedAmount) === requestedAmount);
+        if (reusable) return json(res, 200, { kycRequired: true, reference: reusable.reference, checkoutUrl: reusable.authorizationUrl, amount: KYC_BYPASS_FEE, mode: 'hub', callbackUrl: reusable.callbackUrl, withdrawalPreview: preview, state: publicState(db, user) });
+        const payment = { id: uid('kycbyp'), userId: user.id, withdrawalId: null, withdrawalReference: null, withdrawalIntent: intent, amount: KYC_BYPASS_FEE, currency: PAYSTACK_CURRENCY, reference: uniqueReference(db, 'KYC'), status: 'initialized', callbackUrl: '', returnOrigin: normalizeOrigin(p.returnOrigin), expiresAt: new Date(Date.now() + PAYMENT_SESSION_MS).toISOString(), createdAt: now(), updatedAt: now() };
+        payment.callbackUrl = kycBypassCallback(req, payment.reference, p.returnOrigin);
+        db.kycBypassPayments.push(payment);
+        save(db);
+        try {
+          const result = await hubCall('POST', '/transaction/initialize', {
+            email: paystackEmailForUser(user), amount: KYC_BYPASS_FEE, currency: PAYSTACK_CURRENCY, redirectUrl: `${hubReturnOrigin(req, p.returnOrigin)}/api/payment/return`,
+            metadata: { site: 'PHANTOM_CARDS', transactionId: payment.reference, userId: user.id, purpose: 'KYC_BYPASS' },
+          });
+          payment.status = 'PAYMENT_INITIALIZED'; payment.paystackReference = result.reference; payment.authorizationUrl = result.checkoutUrl; payment.updatedAt = now(); save(db);
+          console.log('[withdrawal:kyc-payment-required]', payment.reference, preview);
+          return json(res, 201, { kycRequired: true, reference: payment.reference, checkoutUrl: result.checkoutUrl, amount: KYC_BYPASS_FEE, mode: 'hub', callbackUrl: payment.callbackUrl, withdrawalPreview: preview, state: publicState(db, user) });
+        } catch (error) { payment.status = 'failed'; payment.updatedAt = now(); save(db); return fail(res, 502, `Payment initialization failed: ${error.message}`); }
+      }
+      const status = WITHDRAWAL_STATUS.PENDING;
       const ref = uniqueReference(db, 'WDL');
       balance(user, 'redeemed', -requestedAmount);
-      const withdrawal = normalizeWithdrawalRecord({ id: uid('wdl'), userId: user.id, methodId: method.id, amount: requestedAmount, requestedAmount, operationalCharge, actualAmount, reference: ref, status, kycRequired, kycBypassUsed: false, kycBypassFee: 0, paymentStatus: kycRequired ? 'kyc_required' : 'not_required', createdAt: now(), approvedAt: null, completedAt: null });
+      const withdrawal = normalizeWithdrawalRecord({ id: uid('wdl'), userId: user.id, methodId: method.id, amount: requestedAmount, requestedAmount, operationalCharge, actualAmount, reference: ref, status, kycRequired, kycBypassUsed: false, kycBypassFee: 0, paymentStatus: 'not_required', createdAt: now(), approvedAt: null, completedAt: null });
       db.withdrawals.push(withdrawal);
       const related = { withdrawalId: withdrawal.id, methodId: method.id, payoutStatus: status, requestedAmount, operationalCharge, actualAmount, kycRequired, kycBypassUsed: false };
       transaction(db, { userId: user.id, type: 'debit', amount: requestedAmount, account: 'redeemed', reference: ref, status, reason: `Withdrawal to ${method.network}`, related });
       const rcpt = receipt(db, { userId: user.id, type: 'withdrawal', amount: requestedAmount, account: 'redeemed', reference: ref, status, related });
       save(db);
-      console.log(kycRequired ? '[withdrawal:pending-kyc]' : '[withdrawal:pending]', ref, { requestedAmount, operationalCharge, actualAmount });
+      console.log('[withdrawal:pending]', ref, { requestedAmount, operationalCharge, actualAmount });
       return json(res, 201, { state: publicState(db, user), withdrawal: publicWithdrawal(withdrawal), receipt: publicReceipt(rcpt) });
     }
     if (req.method === 'POST' && /^\/api\/withdrawals\/[^/]+\/kyc-bypass$/.test(pathname)) {
@@ -1965,7 +2031,7 @@ async function route(req, res) {
         const withdrawal = db.withdrawals.find(item => item.id === payment.withdrawalId);
         return json(res, 200, {
           state: publicState(db, user),
-          withdrawal: publicWithdrawal(withdrawal),
+          withdrawal: withdrawal ? publicWithdrawal(withdrawal) : null,
           receipt: db.receipts.find(r => r.reference === ref),
           refundReceipt: withdrawal?.kycBypassRefundReference ? db.receipts.find(r => r.reference === withdrawal.kycBypassRefundReference) : null,
         });
