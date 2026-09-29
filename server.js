@@ -522,6 +522,7 @@ function normalizeDb(db) {
     user.redeemedBalance = money(user.redeemedBalance || 0);
     user.kycStatus = Object.values(KYC_STATUS).includes(user.kycStatus) ? user.kycStatus : KYC_STATUS.NOT_VERIFIED;
     user.kycVerifiedAt = user.kycStatus === KYC_STATUS.VERIFIED ? (user.kycVerifiedAt || now()) : null;
+    user.canBuyWithBalance = Boolean(user.canBuyWithBalance);
     user.blocked = Boolean(user.blocked);
     user.blockedAt = user.blocked ? (user.blockedAt || now()) : null;
     user.blockedReason = user.blocked ? String(user.blockedReason || '').trim().slice(0, 500) : null;
@@ -691,7 +692,7 @@ function publicState(db, user) {
   const dailyRecord = db.dailyPurchaseCounts.find(item => item.userId === userId && item.purchaseDate === purchaseDate);
   const dailyPurchaseCount = Math.min(Number(dailyRecord?.count) || 0, DAILY_CARD_PURCHASE_LIMIT);
   return {
-    user: { id: user.id, name: user.name, email: user.email || '', phone: user.phone, contactEmailCapturedAt: user.contactEmailCapturedAt || null, createdAt: user.createdAt, walletBalance: user.walletBalance, redeemedBalance: user.redeemedBalance, hasPin: Boolean(user.pinHash), kycStatus: user.kycStatus || KYC_STATUS.NOT_VERIFIED, kycVerifiedAt: user.kycVerifiedAt || null, lifetimeRedeemedCards: redeemedCardsCount(db, user.id), lifetimePurchasedCards: purchasedCardsCount(db, user.id) },
+    user: { id: user.id, name: user.name, email: user.email || '', phone: user.phone, contactEmailCapturedAt: user.contactEmailCapturedAt || null, createdAt: user.createdAt, walletBalance: user.walletBalance, redeemedBalance: user.redeemedBalance, hasPin: Boolean(user.pinHash), kycStatus: user.kycStatus || KYC_STATUS.NOT_VERIFIED, kycVerifiedAt: user.kycVerifiedAt || null, lifetimeRedeemedCards: redeemedCardsCount(db, user.id), lifetimePurchasedCards: purchasedCardsCount(db, user.id), canBuyWithBalance: Boolean(user.canBuyWithBalance) },
     cards, codes, methods: db.methods.filter(x => x.userId === userId), transactions: txs, receipts, purchases, withdrawals,
     // Flat daily total across all tiers, not per price tier.
     withdrawalCardRequirement: withdrawalCardRequirement(db),
@@ -1132,6 +1133,7 @@ function adminSafeUser(user, db) {
     kycStatus: user.kycStatus || KYC_STATUS.NOT_VERIFIED,
     kycVerifiedAt: user.kycVerifiedAt || null,
     kycSubmittedAt: user.kycSubmittedAt || null,
+    canBuyWithBalance: Boolean(user.canBuyWithBalance),
     blocked: Boolean(user.blocked),
     blockedAt: user.blockedAt || null,
     blockedReason: user.blockedReason || null,
@@ -1367,6 +1369,55 @@ async function handlePurchaseRequest(req, res) {
     });
     return fail(res, 502, `Payment initialization failed: ${error.message}`);
   }
+}
+// Buying with wallet balance. Only users an admin has switched on (user.canBuyWithBalance)
+// may do this; everyone else must pay through the checkout. It runs entirely inside the
+// serialized purchase queue so stock, the daily limit and the balance cannot race.
+async function handleBalancePurchaseRequest(req, res) {
+  const p = await body(req);
+  return withPurchaseMutation(async () => {
+    const db = load();
+    const user = requireUser(req, res, db);
+    if (!user) return;
+    if (!user.canBuyWithBalance) return fail(res, 403, 'Paying with your balance is not enabled for your account.');
+    const idempotencyKey = String(p.idempotencyKey || '');
+    if (!/^[A-Za-z0-9_-]{16,160}$/.test(idempotencyKey)) return fail(res, 400, 'Purchase request is missing a valid idempotency key.');
+    const existing = db.purchases.find(item => item.userId === user.id && item.idempotencyKey === idempotencyKey);
+    if (existing) {
+      if (existing.cardId !== p.cardId) return fail(res, 409, 'This purchase key belongs to a different card.');
+      const existingReceipt = db.receipts.find(item => item.reference === existing.reference);
+      return json(res, 200, { duplicate: true, state: publicState(db, user), purchase: publicPurchase(existing), receipt: existingReceipt && publicReceipt(existingReceipt) });
+    }
+    sweepCardPayments(db);
+    const card = db.cards.find(c => c.id === p.cardId && c.active);
+    if (!card || card.stock < 1 || card.isFreeGift) return fail(res, 404, 'This card is unavailable.');
+    const purchaseDate = ghanaCalendarDate();
+    const dailyRecord = db.dailyPurchaseCounts.find(item => item.userId === user.id && item.purchaseDate === purchaseDate);
+    const purchasedToday = Number(dailyRecord?.count || 0);
+    const pendingToday = db.cardPayments.filter(item => item.userId === user.id && item.purchaseDate === purchaseDate && cardPaymentIsActive(item)).length;
+    if (purchasedToday + pendingToday >= DAILY_CARD_PURCHASE_LIMIT) return fail(res, 409, `Your daily purchase limit of ${DAILY_CARD_PURCHASE_LIMIT} cards has been reached for today. It resets at midnight Ghana time.`);
+    const amount = money(card.priceGhs);
+    if (money(user.walletBalance) < amount) return fail(res, 402, `Your balance is GHS ${money(user.walletBalance).toFixed(2)}, which is not enough for this GHS ${amount.toFixed(2)} card. Top up your wallet and try again.`);
+
+    const orderId = uniqueReference(db, 'ORD');
+    const purchaseReference = uniqueReference(db, 'PUR');
+    const code = uniqueCode(db);
+    const reward = rewardAllocationForPrice(amount);
+    const createdAt = now();
+    card.stock--; card.active = card.stock > 0;
+    balance(user, 'wallet', -amount);
+    const purchase = { id: uid('order'), orderId, reference: purchaseReference, userId: user.id, cardId: card.id, idempotencyKey, amount, amountPaid: amount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, paymentReference: null, paidWith: 'balance', status: 'sealed', createdAt };
+    db.purchases.push(purchase);
+    if (dailyRecord) dailyRecord.count = Number(dailyRecord.count || 0) + 1;
+    else db.dailyPurchaseCounts.push({ id: uid('daily'), userId: user.id, purchaseDate, count: 1 });
+    db.codes.push({ id: uid('code'), code, userId: user.id, cardId: card.id, orderId, purchaseId: purchase.id, amount: reward.rewardAmount, purchaseAmount: amount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, status: 'unused', createdAt, redeemedAt: null, redemptionReference: null });
+    const related = { cardId: card.id, orderId, code, purchaseAmount: amount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, provider: 'wallet_balance', paidWith: 'balance' };
+    transaction(db, { userId: user.id, type: 'debit', amount, account: 'wallet', reference: purchaseReference, reason: 'Card purchase (wallet balance)', related });
+    const rcpt = receipt(db, { userId: user.id, type: 'purchase', amount, account: 'wallet', reference: purchaseReference, related });
+    save(db);
+    console.log('[purchase:balance]', orderId, { amount, purchaseDate });
+    return json(res, 201, { state: publicState(db, user), purchase: publicPurchase(purchase), receipt: rcpt && publicReceipt(rcpt) });
+  });
 }
 // Free gifts skip the payment hub entirely: no charge, no card payment session.
 // Each user may claim a given gift card exactly once, tracked by looking for an
@@ -1685,6 +1736,20 @@ async function route(req, res) {
       console.log('[settings:update]', JSON.stringify(before), '->', JSON.stringify(next));
       return json(res, 200, { ok: true, settings: { ...next, maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS }, minPurchasedCardsForWithdrawal: next.minPurchasedCardsForWithdrawal });
     }
+    if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/balance-purchase$/.test(pathname)) {
+      const admin = requireAdmin(req, res, db); if (!admin) return;
+      const userId = decodeURIComponent(pathname.split('/')[4]);
+      const target = db.users.find(item => item.id === userId);
+      if (!target) return fail(res, 404, 'User was not found.');
+      const p = await body(req);
+      if (typeof p.enabled !== 'boolean') return fail(res, 400, 'Send enabled as true or false.');
+      const before = { canBuyWithBalance: Boolean(target.canBuyWithBalance) };
+      target.canBuyWithBalance = p.enabled;
+      adminAudit(db, { admin, action: p.enabled ? 'user.balancePurchase.enable' : 'user.balancePurchase.disable', targetType: 'user', targetId: userId, before, after: { canBuyWithBalance: target.canBuyWithBalance }, reason: String(p.note || '').slice(0, 500) });
+      save(db);
+      console.log('[user:balance-purchase]', userId, target.canBuyWithBalance);
+      return json(res, 200, { ok: true, user: adminSafeUser(target, db) });
+    }
     if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/block$/.test(pathname)) {
       const admin = requireAdmin(req, res, db); if (!admin) return;
       const userId = decodeURIComponent(pathname.split('/')[4]);
@@ -1758,6 +1823,7 @@ async function route(req, res) {
       return json(res, 200, { ok: true });
     }
     if (req.method === 'POST' && pathname === '/api/purchases') return handlePurchaseRequest(req, res);
+    if (req.method === 'POST' && pathname === '/api/purchases/balance') return handleBalancePurchaseRequest(req, res);
     if (req.method === 'POST' && pathname === '/api/claim-gift') return handleClaimGiftRequest(req, res);
     const user = requireUser(req, res, db); if (!user) return;
     if (req.method === 'GET' && pathname === '/api/state') return json(res, 200, publicState(db, user));

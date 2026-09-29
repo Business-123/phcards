@@ -821,8 +821,79 @@
         if (!card) return showToast('error', 'This card is unavailable.');
         if (dailyPurchaseLimitReached(card)) return showToast('info', `Limit reached. ${countdownText(Math.max(0, nextGhanaMidnight() - Date.now()))}.`);
         if (card.active === false || Number(card.stock || 0) < 1) return showToast('error', 'This card is out of stock.');
-        return completePurchase(card.id, purchaseRequestKey(card.id));
+        // Users an admin has approved for balance purchases get a choice; everyone else confirms the price, then goes to checkout.
+        if (state.user?.canBuyWithBalance) return showBalancePurchaseChoice(card);
+        return showPurchaseConfirm(card);
     };
+
+    function showPurchaseConfirm(card) {
+        const price = Number(card.priceGhs ?? card.price ?? 0);
+        openFlowSheet({
+            title: 'Confirm purchase',
+            body: `
+                <div class="flow-summary">
+                    <div class="summary-row"><span>Card</span><strong>${escape(card.title || 'Sealed card')}</strong></div>
+                    <div class="summary-row"><span>Price</span><strong>${ghs(price)}</strong></div>
+                </div>
+            `,
+            primaryText: 'Confirm',
+            secondaryText: 'Cancel',
+            onPrimary: () => { closeFlowSheet(); completePurchase(card.id, purchaseRequestKey(card.id)); },
+        });
+    }
+
+    function showBalancePurchaseChoice(card) {
+        const price = Number(card.priceGhs ?? card.price ?? 0);
+        const wallet = Number(state.user?.walletBalance || 0);
+        const enough = wallet >= price;
+        openFlowSheet({
+            title: 'Choose how to pay',
+            body: `
+                <div class="flow-summary">
+                    <div class="summary-row"><span>Card</span><strong>${escape(card.title || 'Sealed card')}</strong></div>
+                    <div class="summary-row"><span>Price</span><strong>${ghs(price)}</strong></div>
+                    <div class="summary-row"><span>Your balance</span><strong>${ghs(wallet)}</strong></div>
+                </div>
+                ${enough ? '' : `<p class="kyc-refund-note">Your balance is not enough for this card. Top up your wallet, or pay with the secure checkout instead.</p>`}
+                <button class="btn btn-secondary mt-3" type="button" style="width:100%" onclick="window.payForCardWithCheckout('${escape(card.id)}')">Pay with secure checkout instead</button>
+            `,
+            primaryText: `Pay ${ghs(price)} from balance`,
+            primaryDisabled: !enough,
+            onPrimary: () => { closeFlowSheet(); completeBalancePurchase(card.id); },
+        });
+    }
+
+    window.payForCardWithCheckout = function (cardId) {
+        closeFlowSheet();
+        return completePurchase(cardId, purchaseRequestKey(cardId));
+    };
+
+    async function completeBalancePurchase(cardId) {
+        const idempotencyKey = purchaseRequestKey(cardId);
+        if (purchaseRequests.has(idempotencyKey)) return purchaseRequests.get(idempotencyKey);
+        openPurchaseModal(`
+            <div class="purchase-process" aria-label="Completing your purchase">
+                <span class="purchase-spinner" aria-hidden="true"></span>
+                <h2>Completing your purchase</h2>
+                <p>Charging your balance...</p>
+            </div>
+        `);
+        const request = (async () => {
+            try {
+                const data = await api('/api/purchases/balance', { method: 'POST', body: JSON.stringify({ cardId, idempotencyKey }) });
+                clearPurchaseRequestKey(cardId);
+                applyServerState(data.state, { refreshUI: false, reason: 'balance-purchase' });
+                refreshMountedUI('balance-purchase');
+                purchaseSuccessModal(data.purchase, state.cards.find(card => card.id === data.purchase.cardId), { copy: 'Paid from your balance. Your card is now available in your account.' });
+            } catch (e) {
+                purchaseFailureModal(e.message, () => completeBalancePurchase(cardId));
+            } finally {
+                purchaseRequests.delete(idempotencyKey);
+            }
+        })();
+        purchaseRequests.set(idempotencyKey, request);
+        return request;
+    }
 
     async function completePurchase(cardId, idempotencyKey, retried = false) {
         if (purchaseRequests.has(idempotencyKey)) return purchaseRequests.get(idempotencyKey);

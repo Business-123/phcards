@@ -215,3 +215,5 @@ td small { display: block; margin-top: 4px; color: var(--faint); font-size: 9px;
 .setting-input em { color: var(--muted); font-size: 11px; font-style: normal; white-space: nowrap; }
 .setting-field small { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.4; }
 @media (max-width: 760px) { .settings-form { grid-template-columns: 1fr; } }
+
+.tiny-button.active { background: var(--gold); color: #0a0a0f; border-color: var(--gold); }
