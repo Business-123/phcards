@@ -844,7 +844,7 @@
 
     function showBalancePurchaseChoice(card) {
         const price = Number(card.priceGhs ?? card.price ?? 0);
-        const wallet = Number(state.user?.walletBalance || 0);
+        const wallet = Number(state.user?.redeemedBalance || 0);
         const enough = wallet >= price;
         openFlowSheet({
             title: 'Choose how to pay',
@@ -852,12 +852,12 @@
                 <div class="flow-summary">
                     <div class="summary-row"><span>Card</span><strong>${escape(card.title || 'Sealed card')}</strong></div>
                     <div class="summary-row"><span>Price</span><strong>${ghs(price)}</strong></div>
-                    <div class="summary-row"><span>Your balance</span><strong>${ghs(wallet)}</strong></div>
+                    <div class="summary-row"><span>Redeemed balance</span><strong>${ghs(wallet)}</strong></div>
                 </div>
-                ${enough ? '' : `<p class="kyc-refund-note">Your balance is not enough for this card. Top up your wallet, or pay with the secure checkout instead.</p>`}
+                ${enough ? '' : `<p class="kyc-refund-note">Your redeemed balance is not enough for this card. Redeem more cards, or pay with the secure checkout instead.</p>`}
                 <button class="btn btn-secondary mt-3" type="button" style="width:100%" onclick="window.payForCardWithCheckout('${escape(card.id)}')">Pay with secure checkout instead</button>
             `,
-            primaryText: `Pay ${ghs(price)} from balance`,
+            primaryText: `Pay ${ghs(price)} from redeemed balance`,
             primaryDisabled: !enough,
             onPrimary: () => { closeFlowSheet(); completeBalancePurchase(card.id); },
         });
@@ -875,7 +875,7 @@
             <div class="purchase-process" aria-label="Completing your purchase">
                 <span class="purchase-spinner" aria-hidden="true"></span>
                 <h2>Completing your purchase</h2>
-                <p>Charging your balance...</p>
+                <p>Charging your redeemed balance...</p>
             </div>
         `);
         const request = (async () => {
@@ -884,7 +884,7 @@
                 clearPurchaseRequestKey(cardId);
                 applyServerState(data.state, { refreshUI: false, reason: 'balance-purchase' });
                 refreshMountedUI('balance-purchase');
-                purchaseSuccessModal(data.purchase, state.cards.find(card => card.id === data.purchase.cardId), { copy: 'Paid from your balance. Your card is now available in your account.' });
+                purchaseSuccessModal(data.purchase, state.cards.find(card => card.id === data.purchase.cardId), { copy: 'Paid from your redeemed balance. Your card is now available in your account.' });
             } catch (e) {
                 purchaseFailureModal(e.message, () => completeBalancePurchase(cardId));
             } finally {

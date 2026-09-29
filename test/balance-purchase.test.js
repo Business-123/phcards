@@ -21,7 +21,7 @@ async function waitForHealth(baseUrl) {
   throw new Error('Test server did not start.');
 }
 
-test('admin can allow a user to buy cards with wallet balance, and it is enforced', { timeout: 25000 }, async t => {
+test('admin can allow a user to buy cards with redeemed balance, and it is enforced', { timeout: 25000 }, async t => {
   const port = await freePort();
   const dataFile = path.join(os.tmpdir(), `phantom-balance-buy-${process.pid}-${Date.now()}.json`);
   const server = spawn(process.execPath, ['server.js'], {
@@ -70,29 +70,29 @@ test('admin can allow a user to buy cards with wallet balance, and it is enforce
   const broke = await buy();
   assert.equal(broke.response.status, 402);
 
-  // Give the user wallet balance through a completed ledger credit.
+  // Give the user redeemed balance through a completed ledger credit.
   const price = Number(card.priceGhs ?? card.price);
   const db = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
-  db.transactions.push({ id: 'wallet_credit_test', userId, type: 'credit', amount: price + 10, account: 'wallet', reference: 'WALLET_TEST_CREDIT', status: 'completed', reason: 'Deposit', related: {}, createdAt: new Date().toISOString() });
-  db.users.find(u => u.id === userId).walletBalance = price + 10;
+  db.transactions.push({ id: 'wallet_credit_test', userId, type: 'credit', amount: price + 10, account: 'redeemed', reference: 'REDEEMED_TEST_CREDIT', status: 'completed', reason: 'Redeemed code', related: {}, createdAt: new Date().toISOString() });
+  db.users.find(u => u.id === userId).redeemedBalance = price + 10;
   fs.writeFileSync(dataFile, JSON.stringify(db));
 
   const stockBefore = (await asUser('/api/state')).data.cards.find(c => c.id === card.id).stock;
   const ok = await buy();
   assert.equal(ok.response.status, 201, JSON.stringify(ok.data));
-  assert.equal(ok.data.state.user.walletBalance, 10, 'the card price came out of the wallet balance');
+  assert.equal(ok.data.state.user.redeemedBalance, 10, 'the card price came out of the redeemed balance');
   assert.equal(ok.data.state.user.lifetimePurchasedCards, 1, 'counts toward the withdrawal card requirement');
   const stockAfter = ok.data.state.cards.find(c => c.id === card.id).stock;
   assert.equal(stockAfter, stockBefore - 1);
   const debit = ok.data.state.transactions.find(x => x.reference === ok.data.purchase.reference);
-  assert.equal(debit.account, 'wallet');
+  assert.equal(debit.account, 'redeemed');
   assert.equal(debit.type, 'debit');
 
   // Same key again is a no-op, not a second charge.
   const dup = await buy();
   assert.equal(dup.response.status, 200);
   assert.equal(dup.data.duplicate, true);
-  assert.equal((await asUser('/api/state')).data.user.walletBalance, 10);
+  assert.equal((await asUser('/api/state')).data.user.redeemedBalance, 10);
 
   // Switching it off stops balance purchases again.
   await asAdmin(`/api/admin/users/${userId}/balance-purchase`, { method: 'POST', body: JSON.stringify({ enabled: false }) });

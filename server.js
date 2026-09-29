@@ -1370,7 +1370,7 @@ async function handlePurchaseRequest(req, res) {
     return fail(res, 502, `Payment initialization failed: ${error.message}`);
   }
 }
-// Buying with wallet balance. Only users an admin has switched on (user.canBuyWithBalance)
+// Buying with redeemed balance. Only users an admin has switched on (user.canBuyWithBalance)
 // may do this; everyone else must pay through the checkout. It runs entirely inside the
 // serialized purchase queue so stock, the daily limit and the balance cannot race.
 async function handleBalancePurchaseRequest(req, res) {
@@ -1397,7 +1397,7 @@ async function handleBalancePurchaseRequest(req, res) {
     const pendingToday = db.cardPayments.filter(item => item.userId === user.id && item.purchaseDate === purchaseDate && cardPaymentIsActive(item)).length;
     if (purchasedToday + pendingToday >= DAILY_CARD_PURCHASE_LIMIT) return fail(res, 409, `Your daily purchase limit of ${DAILY_CARD_PURCHASE_LIMIT} cards has been reached for today. It resets at midnight Ghana time.`);
     const amount = money(card.priceGhs);
-    if (money(user.walletBalance) < amount) return fail(res, 402, `Your balance is GHS ${money(user.walletBalance).toFixed(2)}, which is not enough for this GHS ${amount.toFixed(2)} card. Top up your wallet and try again.`);
+    if (money(user.redeemedBalance) < amount) return fail(res, 402, `Your redeemed balance is GHS ${money(user.redeemedBalance).toFixed(2)}, which is not enough for this GHS ${amount.toFixed(2)} card. Redeem more cards or pay with the secure checkout instead.`);
 
     const orderId = uniqueReference(db, 'ORD');
     const purchaseReference = uniqueReference(db, 'PUR');
@@ -1405,15 +1405,15 @@ async function handleBalancePurchaseRequest(req, res) {
     const reward = rewardAllocationForPrice(amount);
     const createdAt = now();
     card.stock--; card.active = card.stock > 0;
-    balance(user, 'wallet', -amount);
-    const purchase = { id: uid('order'), orderId, reference: purchaseReference, userId: user.id, cardId: card.id, idempotencyKey, amount, amountPaid: amount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, paymentReference: null, paidWith: 'balance', status: 'sealed', createdAt };
+    balance(user, 'redeemed', -amount);
+    const purchase = { id: uid('order'), orderId, reference: purchaseReference, userId: user.id, cardId: card.id, idempotencyKey, amount, amountPaid: amount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, paymentReference: null, paidWith: 'redeemed_balance', status: 'sealed', createdAt };
     db.purchases.push(purchase);
     if (dailyRecord) dailyRecord.count = Number(dailyRecord.count || 0) + 1;
     else db.dailyPurchaseCounts.push({ id: uid('daily'), userId: user.id, purchaseDate, count: 1 });
     db.codes.push({ id: uid('code'), code, userId: user.id, cardId: card.id, orderId, purchaseId: purchase.id, amount: reward.rewardAmount, purchaseAmount: amount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, status: 'unused', createdAt, redeemedAt: null, redemptionReference: null });
-    const related = { cardId: card.id, orderId, code, purchaseAmount: amount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, provider: 'wallet_balance', paidWith: 'balance' };
-    transaction(db, { userId: user.id, type: 'debit', amount, account: 'wallet', reference: purchaseReference, reason: 'Card purchase (wallet balance)', related });
-    const rcpt = receipt(db, { userId: user.id, type: 'purchase', amount, account: 'wallet', reference: purchaseReference, related });
+    const related = { cardId: card.id, orderId, code, purchaseAmount: amount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, provider: 'redeemed_balance', paidWith: 'redeemed_balance' };
+    transaction(db, { userId: user.id, type: 'debit', amount, account: 'redeemed', reference: purchaseReference, reason: 'Card purchase (redeemed balance)', related });
+    const rcpt = receipt(db, { userId: user.id, type: 'purchase', amount, account: 'redeemed', reference: purchaseReference, related });
     save(db);
     console.log('[purchase:balance]', orderId, { amount, purchaseDate });
     return json(res, 201, { state: publicState(db, user), purchase: publicPurchase(purchase), receipt: rcpt && publicReceipt(rcpt) });
