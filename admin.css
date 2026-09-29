@@ -192,6 +192,12 @@ td small { display: block; margin-top: 4px; color: var(--faint); font-size: 9px;
 .action-modal { position: fixed; z-index: 40; inset: 0; display: none; place-items: center; padding: 20px; background: rgba(30,27,24,.35); } .action-modal.open { display: grid; }
 .modal-card { position: relative; width: min(460px, 100%); padding: 29px; background: var(--surface); border: 1px solid var(--border); border-radius: 17px; box-shadow: var(--shadow); } .modal-card h2 { margin: 8px 0; font-size: 22px; letter-spacing: -.04em; } .modal-card > p:not(.eyebrow):not(.form-error) { color: var(--muted); line-height: 1.55; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 17px; }
+.edit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 14px; max-height: 46vh; overflow-y: auto; }
+.checkbox-row { display: flex; align-items: center; gap: 9px; margin-top: 15px; color: var(--text); font-size: 12px; font-weight: 600; }
+.checkbox-row input { width: 16px; height: 16px; margin: 0; }
+#editBlockedReasonWrap { display: none; }
+#editBlockedReasonWrap.visible { display: grid; }
+.edit-user-button { margin-top: 12px; }
 .toast { position: fixed; z-index: 50; right: 22px; bottom: 22px; max-width: 360px; padding: 12px 15px; color: white; background: #29251f; border-radius: 8px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transform: translateY(10px); transition: .2s ease; font-size: 11px; } .toast.show { opacity: 1; transform: translateY(0); }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 1050px) { .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dashboard-grid, .split-grid { grid-template-columns: 1fr; } }

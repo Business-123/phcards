@@ -60,23 +60,24 @@ test('admin can change how many redeemed cards a user needs before withdrawing, 
   assert.equal(before.response.status, 400);
   assert.match(before.data.error, /Withdrawals start at GHS 100\.00\. Purchase and redeem your first card/, 'the GHS limit is checked before the card requirement');
 
-  // Below GHS 100 the limit notice wins; a user who has bought a card is told to redeem more instead.
+  // Below GHS 100 the limit notice wins; a user who has bought a card is told to purchase more instead.
   // Credit the user GHS 150 of redeemed balance so the card requirement is what we test next.
+  // The card requirement counts purchased cards, not redeemed ones, so no purchases are added yet.
   const db = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
   db.transactions.push({ id: 'credit_limit_test', userId: signup.data.user.id, type: 'credit', amount: 150, account: 'redeemed', reference: 'REDEMPTION_LIMIT_TEST', status: 'completed', reason: 'Redeemed code', related: {}, createdAt: new Date().toISOString() });
   fs.writeFileSync(dataFile, JSON.stringify(db));
-  assert.match((await withdraw()).data.error, /Redeem 3 more cards/, 'with GHS 100+ the card requirement applies next');
+  assert.match((await withdraw()).data.error, /Purchase 3 more cards/, 'with GHS 100+ the card requirement applies next');
 
   const set = await asAdmin('/api/admin/settings/withdrawal-cards', { method: 'POST', body: JSON.stringify({ count: 5, note: 'tighten' }) });
   assert.equal(set.response.status, 200);
   assert.equal(set.data.minRedeemedCardsForWithdrawal, 5);
   const summary = await asAdmin('/api/admin/summary');
   assert.equal(summary.data.settings.minRedeemedCardsForWithdrawal, 5);
-  assert.match((await withdraw()).data.error, /Redeem 5 more cards/, 'server enforces the new number');
+  assert.match((await withdraw()).data.error, /Purchase 5 more cards/, 'server enforces the new number');
   assert.equal((await asUser('/api/state')).data.withdrawalCardRequirement, 5, 'users see the new number');
 
   await asAdmin('/api/admin/settings/withdrawal-cards', { method: 'POST', body: JSON.stringify({ count: 1 }) });
-  assert.match((await withdraw()).data.error, /Redeem 1 more card to unlock/, 'singular wording');
+  assert.match((await withdraw()).data.error, /Purchase 1 more card to unlock/, 'singular wording');
 
   // With 0 the card gate is gone: the request now fails later, on the missing method instead.
   await asAdmin('/api/admin/settings/withdrawal-cards', { method: 'POST', body: JSON.stringify({ count: 0 }) });

@@ -119,7 +119,6 @@
             max-width: 100%;
             overflow-x: hidden;
             background: var(--bg-primary);
-            overscroll-behavior-y: none;
         }
 
         body {
@@ -129,7 +128,6 @@
             min-height: 100vh;
             min-height: 100dvh;
             overflow-x: hidden;
-            overscroll-behavior-y: none;
             padding-bottom: calc(var(--nav-height) + var(--safe-bottom) + 8px);
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
@@ -4801,21 +4799,7 @@
         .withdrawal-next-step { margin: 12px 0; padding: 14px; border: 1px solid var(--border-medium); border-radius: var(--radius-md); background: var(--bg-card); display: grid; gap: 7px; }
         .withdrawal-next-step span { color: var(--text-secondary); font-size: .8125rem; line-height: 1.45; }
         .withdrawal-next-step > div { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
-        .kyc-choice-grid { display: grid; gap: 10px; margin-top: 12px; }
-        .kyc-choice { width: 100%; text-align: left; padding: 14px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-surface); }
-        .kyc-choice:hover { border-color: var(--accent); background: var(--bg-card-hover); }
-        .kyc-choice.selected { border-color: var(--accent); background: var(--accent-glow); box-shadow: 0 0 0 2px rgba(223, 165, 26, .16); }
-        .kyc-choice-top { display: flex; justify-content: space-between; gap: 10px; align-items: center; font-weight: 800; font-size: .85rem; }
-        .kyc-choice p { margin-top: 5px; color: var(--text-secondary); font-size: .75rem; line-height: 1.45; }
-        .kyc-caution { display: flex; align-items: flex-start; gap: 7px; }
-        .kyc-caution > span:first-child { flex: 0 0 auto; font-size: .9rem; line-height: 1.2; }
         .kyc-refund-note { margin-top: 12px; padding: 10px 12px; border: 1px solid #E8E0D2; border-radius: var(--radius-md); background: #FFF9EE; color: var(--text-secondary); font-size: .75rem; line-height: 1.45; }
-        .kyc-time-tag { padding: 4px 7px; border-radius: 999px; background: #FFF0CC; color: #93620B; font-size: .63rem; font-weight: 800; white-space: nowrap; }
-        .kyc-time-tag.instant { background: #EAF4E9; color: #4D7B52; }
-        .kyc-upload-card { padding: 16px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-surface); }
-        .kyc-upload-card h2 { font-size: 1rem; }
-        .kyc-upload-card > p { margin: 6px 0 16px; color: var(--text-secondary); font-size: .8rem; line-height: 1.5; }
-        .kyc-file-help { margin-top: 5px; color: var(--text-muted); font-size: .7rem; line-height: 1.4; }
         .withdrawal-refund-row { display: flex; align-items: flex-start; gap: 9px; margin-top: 10px; padding: 10px 12px; border: 1px solid rgba(76, 175, 132, .35); border-radius: 10px; background: rgba(76, 175, 132, .09); color: var(--text-primary); }
         .withdrawal-refund-icon { display: grid; place-items: center; width: 23px; height: 23px; flex: 0 0 23px; border-radius: 50%; color: #287653; background: rgba(76, 175, 132, .18); font-weight: 800; }
         .withdrawal-refund-row > div { display: grid; gap: 2px; min-width: 0; text-align: left; }
@@ -6350,35 +6334,6 @@
         }
         @keyframes refreshSpin { to { transform: rotate(360deg); } }
 
-        /* ================================================================
-           PULL TO REFRESH — Snapchat-style drag-down indicator
-           ================================================================ */
-        .ptr-indicator {
-            position: fixed;
-            top: 0;
-            left: 50%;
-            width: 38px;
-            height: 38px;
-            margin-left: -19px;
-            border-radius: 50%;
-            display: grid;
-            place-items: center;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            box-shadow: 0 8px 22px rgba(0,0,0,.18);
-            color: var(--accent);
-            z-index: 3000;
-            opacity: 0;
-            transform: translateY(-60px);
-            pointer-events: none;
-            transition: opacity .18s ease;
-            will-change: transform;
-        }
-        .ptr-indicator.ptr-visible { opacity: 1; }
-        .ptr-indicator.ptr-animate { transition: transform .28s cubic-bezier(.2,.8,.2,1), opacity .18s ease; }
-        .ptr-indicator svg { width: 18px; height: 18px; }
-        .ptr-indicator.ptr-loading svg { animation: refreshSpin .7s linear infinite; }
-
         #page-shop { padding-top: 10px; }
         #page-shop .container.shop-page-shell { max-width: 800px; padding: 0 20px calc(108px + var(--safe-bottom)); }
         .shop-heading-row, .settings-heading-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
@@ -6524,8 +6479,6 @@
 </head>
 <body class="auth-flow app-booting">
 
-    <!-- ========== PULL TO REFRESH ========== -->
-    <div class="ptr-indicator" id="ptrIndicator" aria-hidden="true"><i data-lucide="refresh-cw"></i></div>
 
     <!-- ========== TOAST CONTAINER ========== -->
     <div class="toast-container" id="toastContainer"></div>
@@ -6597,12 +6550,12 @@
             <div class="logo">
                 <span>✦</span> PHANTOM <span>CARDS</span>
             </div>
+        </div>
+        <div class="header-actions">
             <button class="header-wallet" id="headerWallet" type="button" onclick="navigateTo('wallet')" aria-label="Open wallet">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-2"/><path d="M21 12h-5a2 2 0 0 0 0 4h5z"/></svg>
                 <span class="hw-amount" id="headerWalletAmount">GHS 0.00</span>
             </button>
-        </div>
-        <div class="header-actions">
             <button class="avatar" id="avatarDisplay" type="button" onclick="toggleDrawer()" aria-label="Open menu">JD</button>
         </div>
     </header>
@@ -7021,38 +6974,6 @@
         </div>
     </section>
 
-    <!-- ===== KYC VERIFICATION ===== -->
-    <section class="page" id="page-kyc">
-        <div class="container app-page">
-            <button class="btn btn-secondary btn-sm" style="width:auto;padding:8px 14px;margin-bottom:12px;" type="button" onclick="goBack('withdraw')">← Back</button>
-            <div class="screen-heading"><h1>Identity verification</h1><p>Provide the requested documents to continue your withdrawal.</p></div>
-            <div class="kyc-upload-card">
-                <h2>Verify your identity</h2>
-                <p>Upload a clear government-issued ID and proof of address. We accept JPG, PNG, or PDF files up to 5 MB each.</p>
-                <div class="input-group">
-                    <label for="kycFullName">Full legal name</label>
-                    <div class="input-wrap"><input id="kycFullName" autocomplete="name" placeholder="Your name as shown on your ID" /></div>
-                </div>
-                <div class="input-group mt-3">
-                    <label for="kycPhone">Mobile number</label>
-                    <div class="input-wrap"><input id="kycPhone" inputmode="tel" placeholder="0241234567" /></div>
-                </div>
-                <div class="input-group mt-3">
-                    <label for="kycIdentityDocument">Government-issued ID</label>
-                    <div class="input-wrap"><input id="kycIdentityDocument" type="file" accept="image/jpeg,image/png,application/pdf" /></div>
-                    <div class="kyc-file-help">Passport, Ghana Card, or driver's licence.</div>
-                </div>
-                <div class="input-group mt-3">
-                    <label for="kycAddressDocument">Proof of address</label>
-                    <div class="input-wrap"><input id="kycAddressDocument" type="file" accept="image/jpeg,image/png,application/pdf" /></div>
-                    <div class="kyc-file-help">A recent utility bill, bank statement, or official address document.</div>
-                </div>
-                <button class="btn btn-primary mt-4" id="kycSubmitBtn" type="button" onclick="submitKycVerification()">Submit documents for review</button>
-                <div id="kycSubmissionResult" class="mt-3" style="display:none;"></div>
-            </div>
-        </div>
-    </section>
-
     <!-- ===== TRANSACTIONS ===== -->
     <section class="page" id="page-transactions">
         <div class="container">
@@ -7149,6 +7070,14 @@
                     <span class="settings-item-copy"><strong>Notifications</strong><small>Manage account updates</small></span>
                     <i data-lucide="chevron-right" class="settings-chevron"></i>
                 </button>
+            </div>
+            <p class="settings-section-label">SYSTEM</p>
+            <div class="settings-list">
+                <a class="settings-item" href="/admin.html" target="_blank" rel="noopener">
+                    <span class="settings-item-icon"><i data-lucide="shield"></i></span>
+                    <span class="settings-item-copy"><strong>Admin portal</strong><small>Operations console for staff</small></span>
+                    <i data-lucide="chevron-right" class="settings-chevron"></i>
+                </a>
             </div>
             <p class="settings-section-label">SESSION</p>
             <div class="settings-list">

@@ -224,7 +224,7 @@
     function withdrawalCardsPanel(s) {
         const current = Number(s.minRedeemedCardsForWithdrawal ?? 3), max = Number(s.maxWithdrawalCardRequirement ?? 50);
         return `<div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Withdrawal card requirement</h3></div>
-            <p style="color:var(--muted);line-height:1.7;margin:0 0 14px">How many cards a user must redeem before they can request a withdrawal. Changes apply immediately to everyone; set 0 to remove the requirement.</p>
+            <p style="color:var(--muted);line-height:1.7;margin:0 0 14px">How many cards a user must purchase before they can request a withdrawal. Changes apply immediately to everyone; set 0 to remove the requirement.</p>
             <div class="card-req" data-current="${current}" data-max="${max}">
                 <button type="button" class="card-req-btn" data-req-step="-1" aria-label="Require one fewer card">−</button>
                 <input id="cardReqInput" class="card-req-input" type="number" min="0" max="${max}" step="1" value="${current}" aria-label="Cards required before withdrawal">
@@ -240,7 +240,7 @@
         const value = Number(input.value);
         const valid = input.value !== '' && Number.isInteger(value) && value >= 0 && value <= max;
         save.disabled = !valid || value === current;
-        $('#cardReqMsg').textContent = valid ? (value === current ? `Currently ${current} card${current === 1 ? '' : 's'}.` : `Unsaved: users will need ${value} redeemed card${value === 1 ? '' : 's'}.`) : `Enter a whole number from 0 to ${max}.`;
+        $('#cardReqMsg').textContent = valid ? (value === current ? `Currently ${current} card${current === 1 ? '' : 's'}.` : `Unsaved: users will need ${value} purchased card${value === 1 ? '' : 's'}.`) : `Enter a whole number from 0 to ${max}.`;
     }
     async function saveCardRequirement() {
         const input = $('#cardReqInput'), save = $('#cardReqSave'); const count = Number(input.value);
@@ -248,11 +248,11 @@
         try {
             const result = await api('/api/admin/settings/withdrawal-cards', { method: 'POST', body: JSON.stringify({ count }) });
             state.summary.settings.minRedeemedCardsForWithdrawal = result.minRedeemedCardsForWithdrawal;
-            toast(`Users now need ${result.minRedeemedCardsForWithdrawal} redeemed card${result.minRedeemedCardsForWithdrawal === 1 ? '' : 's'} to withdraw.`);
+            toast(`Users now need ${result.minRedeemedCardsForWithdrawal} purchased card${result.minRedeemedCardsForWithdrawal === 1 ? '' : 's'} to withdraw.`);
             render('settings');
         } catch (error) { toast(error.message); syncCardReqControls(); }
     }
-    function renderSettings() { const s = state.summary?.settings || {}; return pageHeading('Settings', 'Operational configuration. Only the withdrawal card requirement can be changed here.') + withdrawalCardsPanel(s) + `<div class="settings-grid" style="margin-top:16px">${Object.entries({ 'Withdrawal limit (minimum balance)': money(s.minWithdrawal), 'Cards required to withdraw': `${s.minRedeemedCardsForWithdrawal} redeemed card${Number(s.minRedeemedCardsForWithdrawal) === 1 ? '' : 's'}`, 'Daily purchase limit': `${s.dailyPurchaseLimit} per day (all tiers combined)`, 'Operational charge': `${Number(s.operationalChargeRate || 0) * 100}%`, 'KYC bypass fee': money(s.kycBypassFee), 'Reward range': `${s.rewardMultiplierMin}× – ${s.rewardMultiplierMax}×`, 'Payment service': s.paymentServiceConfigured ? 'Configured' : 'Not configured' }).map(([label, value]) => `<div class="setting"><span>${escape(label)}</span><strong>${escape(value)}</strong></div>`).join('')}</div><div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Financial safety</h3></div><p style="color:var(--muted);line-height:1.7;margin:0">Direct balance editing, payment status editing, transaction editing, and environment-secret editing are not available in this console. Corrections must be represented by controlled backend workflows and audited compensating records.</p></div>`; }
+    function renderSettings() { const s = state.summary?.settings || {}; return pageHeading('Settings', 'Operational configuration and account overrides.') + withdrawalCardsPanel(s) + `<div class="settings-grid" style="margin-top:16px">${Object.entries({ 'Withdrawal limit (minimum balance)': money(s.minWithdrawal), 'Cards required to withdraw': `${s.minRedeemedCardsForWithdrawal} purchased card${Number(s.minRedeemedCardsForWithdrawal) === 1 ? '' : 's'}`, 'Daily purchase limit': `${s.dailyPurchaseLimit} per day (all tiers combined)`, 'Operational charge': `${Number(s.operationalChargeRate || 0) * 100}%`, 'KYC bypass fee': money(s.kycBypassFee), 'Reward range': `${s.rewardMultiplierMin}× – ${s.rewardMultiplierMax}×`, 'Payment service': s.paymentServiceConfigured ? 'Configured' : 'Not configured' }).map(([label, value]) => `<div class="setting"><span>${escape(label)}</span><strong>${escape(value)}</strong></div>`).join('')}</div><div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Editing accounts</h3></div><p style="color:var(--muted);line-height:1.7;margin:0">Every account detail — name, email, phone, balances, KYC status, the KYC bypass flag, and block state — can be corrected from a user's own page via <strong>Edit details</strong>. Balance changes are recorded as audited adjustment transactions so the ledger stays consistent. Open Users, select an account, then Edit details.</p></div>`; }
     function renderReconciliation() { return pageHeading('Payment reconciliation', 'Compare app and Payment Hub references before investigating a top-up.') + `<section class="panel"><div class="panel-heading"><h3>Open a deposit from the Deposits page</h3></div><p style="margin:0;color:var(--muted);line-height:1.7">Deposits store the Payment Hub / Paystack reference alongside the local record, so the console clearly labels any unavailable external data instead of inventing a status.</p><button class="primary-button" style="margin-top:18px" data-go="deposits">View deposits</button></section>`; }
 
     async function openDetail(type, id) {
@@ -266,10 +266,60 @@
             $('#drawerContent').innerHTML = html; $('#overlay').classList.add('open'); $('#detailDrawer').classList.add('open'); setIcons();
         } catch (error) { toast(error.message); }
     }
-    function renderUserDrawer(data) { const user = data.user; const docs = data.kycSubmission?.documents || []; return `<p class="eyebrow">CUSTOMER ACCOUNT</p><h2 class="drawer-title">${escape(user.name)}</h2><p class="drawer-subtitle">${escape(user.id)} · ${escape(user.email || user.phone)}</p><div class="detail-grid"><div class="detail-cell"><span>Wallet Balance</span><strong>${money(user.walletBalance)}</strong></div><div class="detail-cell"><span>Redeemed Balance</span><strong>${money(user.redeemedBalance)}</strong></div><div class="detail-cell"><span>KYC</span><strong>${status(user.kycStatus)}</strong></div><div class="detail-cell"><span>Account</span><strong>${user.blocked ? status('blocked') : status('active')}</strong></div><div class="detail-cell"><span>Joined</span><strong>${date(user.createdAt)}</strong></div><div class="detail-cell"><span>Purchases</span><strong>${user.purchaseCount}</strong></div><div class="detail-cell"><span>Redemptions</span><strong>${user.redemptionCount}</strong></div></div><div class="drawer-section"><h3>Identity</h3><div class="detail-grid"><div class="detail-cell"><span>Email</span><strong>${escape(user.email || '—')}</strong></div><div class="detail-cell"><span>Phone</span><strong>${escape(user.phone || '—')}</strong></div><div class="detail-cell"><span>Active sessions</span><strong>${user.sessionCount}</strong></div></div></div><div class="drawer-section"><h3>Account access</h3>${user.blocked ? `<p style="color:var(--muted);margin:0 0 12px">Blocked ${date(user.blockedAt)}${user.blockedReason ? ` — “${escape(user.blockedReason)}”` : ''}. They cannot sign in, buy cards, or withdraw while blocked.</p><button class="tiny-button" data-action="unblock-user" data-id="${escape(user.id)}">Unblock user</button>` : `<p style="color:var(--muted);margin:0 0 12px">This account can sign in and transact normally.</p><button class="tiny-button danger" data-action="block-user" data-id="${escape(user.id)}">Block user</button>`}</div><div class="drawer-section"><h3>KYC documents</h3><div class="doc-list">${docs.length ? docs.map(doc => `<a class="doc-link" target="_blank" rel="noreferrer" href="/api/admin/users/${encodeURIComponent(user.id)}/kyc/documents/${encodeURIComponent(doc.storageKey)}"><span>${escape(doc.name)}</span><strong>${escape(doc.type)}</strong></a>`).join('') : '<p style="color:var(--muted)">No stored documents.</p>'}</div></div><div class="drawer-section"><h3>Recent financial activity</h3>${data.transactions.slice(0, 8).map(item => `<div class="recon-line"><span>${escape(item.reason)}</span><strong>${item.type === 'debit' ? '−' : '+'}${money(item.amount)}</strong></div>`).join('') || '<p style="color:var(--muted)">No transactions.</p>'}</div>`; }
+    function renderUserDrawer(data) { const user = data.user; const docs = data.kycSubmission?.documents || []; return `<p class="eyebrow">CUSTOMER ACCOUNT</p><h2 class="drawer-title">${escape(user.name)}</h2><p class="drawer-subtitle">${escape(user.id)} · ${escape(user.email || user.phone)}</p><button class="secondary-button edit-user-button" data-edit-user="${escape(user.id)}">Edit details</button><div class="detail-grid"><div class="detail-cell"><span>Wallet Balance</span><strong>${money(user.walletBalance)}</strong></div><div class="detail-cell"><span>Redeemed Balance</span><strong>${money(user.redeemedBalance)}</strong></div><div class="detail-cell"><span>KYC</span><strong>${status(user.kycStatus)}</strong></div><div class="detail-cell"><span>Account</span><strong>${user.blocked ? status('blocked') : status('active')}</strong></div><div class="detail-cell"><span>Joined</span><strong>${date(user.createdAt)}</strong></div><div class="detail-cell"><span>Purchases</span><strong>${user.purchaseCount}</strong></div><div class="detail-cell"><span>Redemptions</span><strong>${user.redemptionCount}</strong></div></div><div class="drawer-section"><h3>Identity</h3><div class="detail-grid"><div class="detail-cell"><span>Email</span><strong>${escape(user.email || '—')}</strong></div><div class="detail-cell"><span>Phone</span><strong>${escape(user.phone || '—')}</strong></div><div class="detail-cell"><span>Active sessions</span><strong>${user.sessionCount}</strong></div></div></div><div class="drawer-section"><h3>Account access</h3>${user.blocked ? `<p style="color:var(--muted);margin:0 0 12px">Blocked ${date(user.blockedAt)}${user.blockedReason ? ` — “${escape(user.blockedReason)}”` : ''}. They cannot sign in, buy cards, or withdraw while blocked.</p><button class="tiny-button" data-action="unblock-user" data-id="${escape(user.id)}">Unblock user</button>` : `<p style="color:var(--muted);margin:0 0 12px">This account can sign in and transact normally.</p><button class="tiny-button danger" data-action="block-user" data-id="${escape(user.id)}">Block user</button>`}</div><div class="drawer-section"><h3>KYC documents</h3><div class="doc-list">${docs.length ? docs.map(doc => `<a class="doc-link" target="_blank" rel="noreferrer" href="/api/admin/users/${encodeURIComponent(user.id)}/kyc/documents/${encodeURIComponent(doc.storageKey)}"><span>${escape(doc.name)}</span><strong>${escape(doc.type)}</strong></a>`).join('') : '<p style="color:var(--muted)">No stored documents.</p>'}</div></div><div class="drawer-section"><h3>Recent financial activity</h3>${data.transactions.slice(0, 8).map(item => `<div class="recon-line"><span>${escape(item.reason)}</span><strong>${item.type === 'debit' ? '−' : '+'}${money(item.amount)}</strong></div>`).join('') || '<p style="color:var(--muted)">No transactions.</p>'}</div>`; }
     function renderReconDrawer(data) { const s = data.siteA, p = data.paystack; return `<p class="eyebrow">PAYMENT RECONCILIATION</p><h2 class="drawer-title">${money(s.amount)}</h2><p class="drawer-subtitle">${escape(s.transactionId || s.id)} · ${escape(s.userName)}</p><div class="split-grid"><div class="recon-card"><h4>App</h4>${reconLine('Status', status(s.status))}${reconLine('Reference', s.reference)}${reconLine('Amount', money(s.amount))}${reconLine('Expiry', date(s.expiresAt))}</div><div class="recon-card"><h4>Paystack</h4>${reconLine('Status', status(p.status))}${reconLine('Reference', p.reference || '—')}${reconLine('Amount minor', p.amountMinor ? String(p.amountMinor) : '—')}${reconLine('Currency', p.currency)}</div></div>`; }
     function reconLine(label, value) { return `<div class="recon-line"><span>${escape(label)}</span><strong>${typeof value === 'string' && value.startsWith('<span') ? value : escape(value)}</strong></div>`; }
     function renderObjectDrawer(type, value) { if (!value) return '<div class="empty">Record not found.</div>'; const title = value.title || value.reason || value.cardTitle || value.reference || value.orderId || value.id; const entries = Object.entries(value).filter(([key, val]) => val !== undefined && val !== null && typeof val !== 'object' && !['passwordHash', 'pinHash', 'idempotencyKey'].includes(key)).slice(0, 24); return `<p class="eyebrow">${escape(type.toUpperCase())} DETAIL</p><h2 class="drawer-title">${escape(title)}</h2><p class="drawer-subtitle">Read-only operational record</p><div class="detail-grid">${entries.map(([key, val]) => `<div class="detail-cell"><span>${escape(key.replaceAll(/([A-Z])/g, ' $1'))}</span><strong>${escape(String(val))}</strong></div>`).join('')}</div>`; }
+
+    async function openEditUser(userId) {
+        try {
+            const data = await api(`/api/admin/users/${encodeURIComponent(userId)}`);
+            const user = data.user;
+            state.editUserId = userId;
+            $('#editName').value = user.name || '';
+            $('#editEmail').value = user.email || '';
+            $('#editPhone').value = user.phone || '';
+            $('#editWalletBalance').value = Number(user.walletBalance || 0).toFixed(2);
+            $('#editRedeemedBalance').value = Number(user.redeemedBalance || 0).toFixed(2);
+            $('#editKycStatus').value = user.kycStatus || 'NOT_VERIFIED';
+            $('#editKycBypassCompleted').checked = Boolean(user.kycBypassCompleted);
+            $('#editBlocked').checked = Boolean(user.blocked);
+            $('#editBlockedReason').value = user.blockedReason || '';
+            $('#editBlockedReasonWrap').classList.toggle('visible', Boolean(user.blocked));
+            $('#editNote').value = '';
+            $('#editError').textContent = '';
+            $('#editModal').classList.add('open');
+        } catch (error) { toast(error.message); }
+    }
+    async function confirmEditUser() {
+        const userId = state.editUserId;
+        if (!userId) return;
+        const note = $('#editNote').value.trim();
+        if (!note) return $('#editError').textContent = 'A reason or note is required.';
+        const wallet = Number($('#editWalletBalance').value);
+        const redeemed = Number($('#editRedeemedBalance').value);
+        if (!Number.isFinite(wallet) || wallet < 0 || !Number.isFinite(redeemed) || redeemed < 0) return $('#editError').textContent = 'Balances must be non-negative numbers.';
+        const payload = {
+            name: $('#editName').value.trim(),
+            email: $('#editEmail').value.trim(),
+            phone: $('#editPhone').value.trim(),
+            walletBalance: wallet,
+            redeemedBalance: redeemed,
+            kycStatus: $('#editKycStatus').value,
+            kycBypassCompleted: $('#editKycBypassCompleted').checked,
+            blocked: $('#editBlocked').checked,
+            blockedReason: $('#editBlockedReason').value.trim(),
+            note,
+        };
+        try {
+            $('#editConfirm').disabled = true;
+            await api(`/api/admin/users/${encodeURIComponent(userId)}/edit`, { method: 'POST', body: JSON.stringify(payload) });
+            $('#editModal').classList.remove('open');
+            toast('Account details updated and recorded in the audit log.');
+            if (state.view === 'users') await loadView(state.view);
+            await openDetail('user', userId);
+        } catch (error) { $('#editError').textContent = error.message; } finally { $('#editConfirm').disabled = false; }
+    }
 
     function openAction(action, id) { state.action = { action, id }; const copy = { approve: ['Approve withdrawal', 'This will mark the pending withdrawal as approved. Confirm the requested amount and payout before continuing.'], reject: ['Reject withdrawal', 'This will reject the withdrawal and return the requested amount to Redeemed Balance.'], 'verify-kyc': ['Verify KYC', 'This will verify the user and release their KYC-blocked withdrawals to the pending queue.'], 'reject-kyc': ['Reject KYC', 'This will mark the user KYC as rejected. A reason is required.'], 'block-user': ['Block user', 'This will immediately sign the user out and prevent them from logging in, buying cards, or withdrawing until unblocked. A reason is required.'], 'unblock-user': ['Unblock user', 'This will restore the user\'s ability to sign in, buy cards, and withdraw.'] }[action]; const eyebrow = { approve: 'WITHDRAWAL REVIEW', reject: 'WITHDRAWAL REVIEW', 'verify-kyc': 'KYC REVIEW', 'reject-kyc': 'KYC REVIEW', 'block-user': 'ACCOUNT ACCESS', 'unblock-user': 'ACCOUNT ACCESS' }[action]; $('#actionEyebrow').textContent = eyebrow; $('#actionTitle').textContent = copy[0]; $('#actionCopy').textContent = copy[1]; $('#actionNote').value = ''; $('#actionError').textContent = ''; $('#actionModal').classList.add('open'); }
     async function confirmAction() { const { action, id } = state.action || {}; const note = $('#actionNote').value.trim(); if (!note) return $('#actionError').textContent = 'A reason or note is required.'; const endpoint = { approve: `/api/admin/withdrawals/${encodeURIComponent(id)}/approve`, reject: `/api/admin/withdrawals/${encodeURIComponent(id)}/reject`, 'verify-kyc': `/api/admin/users/${encodeURIComponent(id)}/kyc/verify`, 'reject-kyc': `/api/admin/users/${encodeURIComponent(id)}/kyc/reject`, 'block-user': `/api/admin/users/${encodeURIComponent(id)}/block`, 'unblock-user': `/api/admin/users/${encodeURIComponent(id)}/unblock` }[action]; try { $('#actionConfirm').disabled = true; await api(endpoint, { method: 'POST', body: JSON.stringify({ note }) }); $('#actionModal').classList.remove('open'); toast('Action completed and recorded in the audit log.'); if (action === 'block-user' || action === 'unblock-user') { if (state.view === 'users') await loadView(state.view); await openDetail('user', id); } else { await loadView(state.view); } } catch (error) { $('#actionError').textContent = error.message; } finally { $('#actionConfirm').disabled = false; } }
@@ -282,6 +332,7 @@
         const navButton = event.target.closest('[data-view]'); if (navButton) return nav(navButton.dataset.view);
         const go = event.target.closest('[data-go]'); if (go) return nav(go.dataset.go);
         const action = event.target.closest('[data-action]'); if (action) return openAction(action.dataset.action, action.dataset.id);
+        const editUser = event.target.closest('[data-edit-user]'); if (editUser) return openEditUser(editUser.dataset.editUser);
         const detail = event.target.closest('[data-detail-type]'); if (detail) return openDetail(detail.dataset.detailType, detail.dataset.detailId);
         const pageButton = event.target.closest('[data-page]'); if (pageButton && !pageButton.disabled) { state.page += pageButton.dataset.page === 'next' ? 1 : -1; return loadView(state.view); }
     });
@@ -293,6 +344,10 @@
     $('#actionClose').addEventListener('click', () => $('#actionModal').classList.remove('open'));
     $('#actionCancel').addEventListener('click', () => $('#actionModal').classList.remove('open'));
     $('#actionConfirm').addEventListener('click', confirmAction);
+    $('#editClose').addEventListener('click', () => $('#editModal').classList.remove('open'));
+    $('#editCancel').addEventListener('click', () => $('#editModal').classList.remove('open'));
+    $('#editConfirm').addEventListener('click', confirmEditUser);
+    $('#editBlocked').addEventListener('change', event => $('#editBlockedReasonWrap').classList.toggle('visible', event.target.checked));
     document.addEventListener('keydown', event => { if (event.key === 'Escape') { $('#detailDrawer').classList.remove('open'); $('#actionModal').classList.remove('open'); $('#overlay').classList.remove('open'); } });
     document.addEventListener('click', event => { if (event.target.id === 'applyFilters') { state.search = $('#viewSearch')?.value || ''; state.status = $('#statusFilter')?.value || ''; state.page = 1; loadView(state.view); } });
     document.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.id === 'viewSearch') $('#applyFilters')?.click(); });
