@@ -933,7 +933,11 @@
         }
         const card = state.cards.find(c => c.id === cardId);
         if (!card || !card.isFreeGift) return showToast('error', 'This gift is unavailable.');
-        if (hasClaimedGift(card)) return showToast('info', 'You have already claimed this free gift.');
+        if (hasClaimedGift(card)) {
+            const pending = giftPendingRedeem(card);
+            if (pending) return revealPurchasedCode(pending.id);
+            return showToast('info', 'You have already claimed and redeemed this free gift.');
+        }
         return completeGiftClaim(card.id);
     };
 
@@ -2040,7 +2044,7 @@
     }
 
     function cardIsAvailable(card) {
-        if (card?.isFreeGift) return !hasClaimedGift(card);
+        if (card?.isFreeGift) return !hasClaimedGift(card) || Boolean(giftPendingRedeem(card));
         return Boolean(card && card.active !== false && Number(card.stock || 0) > 0 && !dailyPurchaseLimitReached(card));
     }
 
@@ -2053,6 +2057,16 @@
 
     function hasClaimedGift(card) {
         return (state.purchases || []).some(item => item.cardId === card?.id && item.isFreeGift);
+    }
+
+    // The gift's claim creates a redeem code, and the reward only lands once that code is
+    // entered. If the user claimed but never redeemed, return that pending purchase so the
+    // gift card can send them back to finish redeeming instead of a dead "Already claimed".
+    function giftPendingRedeem(card) {
+        const purchase = (state.purchases || []).find(item => item.cardId === card?.id && item.isFreeGift);
+        if (!purchase) return null;
+        const waiting = (state.redeemedCodes || []).some(code => code.purchaseId === purchase.id && code.status === 'unused');
+        return waiting ? purchase : null;
     }
 
     function cardVisual(card) {
@@ -2124,7 +2138,8 @@
         }[card.category] || '✦';
 
         if (card.isFreeGift) {
-            const claimed = hasClaimedGift(card);
+            const pending = Boolean(giftPendingRedeem(card));
+            const claimed = hasClaimedGift(card) && !pending;
             const available = !claimed;
             return `
                 <div class="${sizeClass} is-gift ${claimed ? 'is-unavailable' : ''}">
@@ -2137,7 +2152,7 @@
                     </div>
                     <div class="market-card-info">
                         <h3>${escape(card.title)}</h3>
-                        <p>${escape(card.category)} · ${claimed ? 'Already claimed' : 'Free — one per account'}</p>
+                        <p>${escape(card.category)} · ${claimed ? 'Already claimed' : pending ? 'Redeem it now' : 'Free — one per account'}</p>
                     </div>
                     <div class="market-card-values">
                         <div>
@@ -2149,7 +2164,7 @@
                             <strong>${escape(potentialRedeem)}</strong>
                         </div>
                     </div>
-                    <button class="btn btn-success buy-btn claim-btn" onclick="handleClaimGift('${escape(card.id)}')" ${available ? '' : 'disabled'}>${available ? 'CLAIM NOW <span aria-hidden="true">→</span>' : 'CLAIMED'}</button>
+                    <button class="btn btn-success buy-btn claim-btn" onclick="handleClaimGift('${escape(card.id)}')" ${available ? '' : 'disabled'}>${available ? `${pending ? 'REDEEM NOW' : 'CLAIM NOW'} <span aria-hidden="true">→</span>` : 'CLAIMED'}</button>
                 </div>
             `;
         }
@@ -2277,7 +2292,8 @@
         safeNavigate('detail', 'card-detail');
 
         if (card.isFreeGift) {
-            const claimed = hasClaimedGift(card);
+            const pending = Boolean(giftPendingRedeem(card));
+            const claimed = hasClaimedGift(card) && !pending;
             const available = !claimed;
             const potentialRedeem = rewardRangeText(card, card.giftBaseValueGhs || 0);
             container.innerHTML = `
@@ -2289,7 +2305,7 @@
                             <div class="card-copy">
                                 <div class="card-series">${escape(card.series || visual.series || 'Phantom Reserve')}</div>
                                 <div class="card-title">${escape(card.title)}</div>
-                                <div class="card-sub">${escape(card.category)} · ${claimed ? 'Already claimed' : 'Free — one per account'}</div>
+                                <div class="card-sub">${escape(card.category)} · ${claimed ? 'Already claimed' : pending ? 'Claimed — redeem to get your reward' : 'Free — one per account'}</div>
                             </div>
                             <div class="card-value-row">
                                 <div class="card-value-metric">
@@ -2302,18 +2318,18 @@
                                 </div>
                             </div>
                         </div>
-                        <button class="btn btn-success buy-btn claim-btn" onclick="handleClaimGift('${escape(card.id)}')" ${available ? '' : 'disabled'}>${available ? 'CLAIM NOW' : 'CLAIMED'}</button>
+                        <button class="btn btn-success buy-btn claim-btn" onclick="handleClaimGift('${escape(card.id)}')" ${available ? '' : 'disabled'}>${available ? (pending ? 'REDEEM NOW' : 'CLAIM NOW') : 'CLAIMED'}</button>
                     </div>
                     <div style="display:flex;gap:16px;flex-wrap:wrap;margin:12px 0 16px;">
                         <div><span class="text-sm text-muted">Price</span><div class="text-xl font-bold">FREE</div></div>
                         <div><span class="text-sm text-muted">You pay</span><div class="text-xl font-bold">GHS 0.00</div></div>
                         <div><span class="text-sm text-muted">Potential redeem</span><div class="text-xl font-bold">${escape(potentialRedeem)}</div></div>
-                        <div><span class="text-sm text-muted">Availability</span><div class="text-xl font-bold ${available ? '' : 'text-error'}">${available ? 'Free to claim' : 'Already claimed'}</div></div>
+                        <div><span class="text-sm text-muted">Availability</span><div class="text-xl font-bold ${available ? '' : 'text-error'}">${available ? (pending ? 'Waiting to be redeemed' : 'Free to claim') : 'Already claimed'}</div></div>
                     </div>
                     <p class="text-sm text-secondary" style="margin:12px 0;">${escape(card.description)}</p>
                     <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap;">
                         <button class="btn btn-secondary" style="flex:1;" onclick="goBack('shop')">← Back</button>
-                        ${available ? `<button class="btn btn-success" style="flex:1;" onclick="handleClaimGift('${escape(card.id)}')">CLAIM NOW</button>` : ''}
+                        ${available ? `<button class="btn btn-success" style="flex:1;" onclick="handleClaimGift('${escape(card.id)}')">${pending ? 'REDEEM NOW' : 'CLAIM NOW'}</button>` : ''}
                     </div>
                 </div>
             `;
