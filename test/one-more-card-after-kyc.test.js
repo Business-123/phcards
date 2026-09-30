@@ -125,3 +125,21 @@ test('paying the KYC fee verifies the user, refunds the fee and rejects the with
   assert.equal(ok.status, 201);
   assert.equal(ok.data.withdrawal.status, 'pending');
 });
+
+test('balance-paid KYC settles the fee first, then rejects until one more card is bought', { timeout: 15000 }, async t => {
+  const h = await boot(t);
+  h.seed({ verified: false });
+  const db = JSON.parse(fs.readFileSync(h.dataFile, 'utf8'));
+  db.users.find(x => x.id === h.userId).canBuyWithBalance = true;
+  fs.writeFileSync(h.dataFile, JSON.stringify(db));
+  const res = await h.request('/api/withdrawals', { method: 'POST', body: body(h, { kycPayWith: 'redeemed_balance' }) }, h.signup.cookie);
+  assert.equal(res.status, 200);
+  assert.equal(res.data.rejection.code, 'NEEDS_ONE_MORE_CARD');
+  const after = JSON.parse(fs.readFileSync(h.dataFile, 'utf8'));
+  assert.equal(after.kycBypassPayments.length, 1, 'the KYC fee payment was recorded before the rejection');
+  const state = await h.request('/api/state', {}, h.signup.cookie);
+  assert.equal(state.data.user.kycStatus, 'VERIFIED');
+  assert.equal(state.data.user.redeemedBalance, 300, 'balance untouched');
+  assert.equal(state.data.withdrawals.filter(w => w.isRefund).length, 1, 'fee refunded');
+  assert.equal(state.data.withdrawals.filter(w => !w.isRefund).length, 0, 'no withdrawal created');
+});

@@ -2027,10 +2027,10 @@ async function route(req, res) {
       const operationalCharge = money(requestedAmount * OPERATIONAL_CHARGE_RATE);
       const actualAmount = money(requestedAmount - operationalCharge);
       const kycRequired = user.kycStatus !== KYC_STATUS.VERIFIED;
-      // Already-verified users (and balance-paid KYC, which settles KYC in this same request)
-      // are rejected here, before any money moves. Users paying the KYC fee through the hub
-      // checkout are rejected once that payment confirms (see createWithdrawalFromKycPayment).
-      if ((!kycRequired || p.kycPayWith === 'redeemed_balance') && needsExtraCardAfterKyc(db, user.id)) return json(res, 400, { error: ONE_MORE_CARD_MESSAGE, code: ONE_MORE_CARD_CODE });
+      // Already-verified users have no fee to pay, so they are rejected here. Anyone who still
+      // owes the KYC fee (checkout or redeemed balance) pays it first and is rejected only
+      // after that payment is confirmed (see createWithdrawalFromKycPayment).
+      if (!kycRequired && needsExtraCardAfterKyc(db, user.id)) return json(res, 400, { error: ONE_MORE_CARD_MESSAGE, code: ONE_MORE_CARD_CODE });
       if (kycRequired && p.kycPayWith === 'redeemed_balance') {
         // Users an admin has approved for balance payments can settle the one-time KYC fee
         // from their redeemed balance instead of the secure checkout. Everything below is
@@ -2041,6 +2041,15 @@ async function route(req, res) {
         const intent = { methodId: method.id, requestedAmount, operationalCharge, actualAmount };
         const payment = { id: uid('kycbyp'), userId: user.id, withdrawalId: null, withdrawalReference: null, withdrawalIntent: intent, amount: KYC_BYPASS_FEE, currency: PAYSTACK_CURRENCY, reference: uniqueReference(db, 'KYC'), status: 'initialized', paidWith: 'redeemed_balance', callbackUrl: '', expiresAt: new Date(Date.now() + PAYMENT_SESSION_MS).toISOString(), createdAt: now(), updatedAt: now() };
         db.kycBypassPayments.push(payment);
+        if (needsExtraCardAfterKyc(db, user.id)) {
+          // Fee is settled first: user is verified, fee is refunded in full, balance untouched,
+          // and only then does the "purchase one more card" rejection go back to the client.
+          completeKycBypassPayment(db, payment, 'redeemed_balance');
+          payment.status = 'success'; payment.rejectionCode = ONE_MORE_CARD_CODE; payment.rejectionReason = ONE_MORE_CARD_MESSAGE;
+          save(db);
+          console.log('[withdrawal:kyc-paid-from-balance-rejected]', payment.reference);
+          return json(res, 200, { paidWithBalance: true, withdrawal: null, rejection: { code: ONE_MORE_CARD_CODE, message: ONE_MORE_CARD_MESSAGE }, state: publicState(db, user) });
+        }
         balance(user, 'redeemed', -KYC_BYPASS_FEE);
         const result = completeKycBypassPayment(db, payment, 'redeemed_balance');
         if (!result.withdrawal) { balance(user, 'redeemed', KYC_BYPASS_FEE); db.kycBypassPayments = db.kycBypassPayments.filter(item => item.id !== payment.id); return fail(res, 409, 'Withdrawal could not be created. Please try again.'); }

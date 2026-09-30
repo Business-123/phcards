@@ -1423,6 +1423,16 @@
                 showKycPaymentSheet(data, payload);
                 return;
             }
+            if (data.rejection?.code === 'NEEDS_ONE_MORE_CARD') {
+                // KYC fee was paid first (and refunded in full); only now is the withdrawal rejected.
+                applyServerState(data.state, { refreshUI: false, reason: 'withdrawal-kyc-balance-rejected' });
+                closeFlowSheet();
+                safeNavigate('withdraw', 'withdrawal-rejected');
+                refreshMountedUI('withdrawal-rejected');
+                withdrawWizard = { amount: 0, methodId: '', pin: '' };
+                showCardsNeededNotice(1, 'KYC verified, but you need to purchase one more card before this withdrawal can go through. Your KYC fee has been refunded and your balance is untouched.');
+                return;
+            }
             if (data.paidWithBalance) {
                 // Approved user paid the one-time KYC fee from redeemed balance: the withdrawal is pending admin approval.
                 applyServerState(data.state, { refreshUI: false, reason: 'withdrawal-kyc-balance' });
