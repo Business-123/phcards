@@ -91,6 +91,8 @@ test('a confirmed GHS 70 KYC bypass leaves its withdrawal pending for admin appr
     db.codes.push({ id: `redeemed_${index}`, userId, cardId: 'CARD-0001', status: 'redeemed', amount: 100, rewardAmount: 100, purchaseAmount: 36, redeemedAt: new Date().toISOString() });
     db.transactions.push({ id: `credit_${index}`, userId, type: 'credit', amount: 100, account: 'redeemed', reference: `REDEMPTION_${index}`, status: 'completed', reason: 'Redeemed code', related: {}, createdAt: new Date().toISOString() });
   }
+  // The withdrawal rule needs one card more than the base requirement (3 + 1 extra).
+  db.purchases.push({ id: 'purchase_extra', userId, cardId: 'CARD-0002', amountPaid: 36, amount: 36, status: 'sealed', createdAt: new Date().toISOString() });
   fs.writeFileSync(dataFile, JSON.stringify(db));
 
   const before = await request('/api/state', {}, signup.cookie);

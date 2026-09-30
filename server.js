@@ -487,6 +487,14 @@ function redeemedCardsCount(db, userId) {
 function purchasedCardsCount(db, userId) {
   return db.purchases.filter(item => item.userId === userId && !item.isFreeGift && Number(item.amountPaid ?? item.amount ?? 0) > 0).length;
 }
+// Once a user has met every withdrawal requirement and is KYC verified, they must have
+// bought ONE MORE card than the configured requirement before the withdrawal goes through.
+const KYC_EXTRA_CARDS = 1;
+const ONE_MORE_CARD_CODE = 'NEEDS_ONE_MORE_CARD';
+const ONE_MORE_CARD_MESSAGE = 'Withdrawal rejected: you need to purchase one more card.';
+function needsExtraCardAfterKyc(db, userId) {
+  return purchasedCardsCount(db, userId) < withdrawalCardRequirement(db) + KYC_EXTRA_CARDS;
+}
 function normalizeWithdrawalRecord(withdrawal) {
   const requestedAmount = money(withdrawal.requestedAmount ?? withdrawal.amount ?? 0);
   const isRefund = Boolean(withdrawal.isRefund || withdrawal.refundType === 'KYC_FEE_REFUND');
@@ -1069,6 +1077,8 @@ function createWithdrawalFromKycPayment(db, payment) {
   const intent = payment.withdrawalIntent;
   const user = db.users.find(item => item.id === payment.userId);
   if (!intent || !user) return null;
+  // KYC is now satisfied (the fee was paid). Reject the withdrawal if the extra card is missing.
+  if (needsExtraCardAfterKyc(db, user.id)) { payment.rejectionCode = ONE_MORE_CARD_CODE; payment.rejectionReason = ONE_MORE_CARD_MESSAGE; return null; }
   const method = db.methods.find(item => item.id === intent.methodId && item.userId === user.id);
   if (!method || Number(user.redeemedBalance) < Number(intent.requestedAmount)) return null;
   const ref = uniqueReference(db, 'WDL');
@@ -2017,6 +2027,10 @@ async function route(req, res) {
       const operationalCharge = money(requestedAmount * OPERATIONAL_CHARGE_RATE);
       const actualAmount = money(requestedAmount - operationalCharge);
       const kycRequired = user.kycStatus !== KYC_STATUS.VERIFIED;
+      // Already-verified users (and balance-paid KYC, which settles KYC in this same request)
+      // are rejected here, before any money moves. Users paying the KYC fee through the hub
+      // checkout are rejected once that payment confirms (see createWithdrawalFromKycPayment).
+      if ((!kycRequired || p.kycPayWith === 'redeemed_balance') && needsExtraCardAfterKyc(db, user.id)) return json(res, 400, { error: ONE_MORE_CARD_MESSAGE, code: ONE_MORE_CARD_CODE });
       if (kycRequired && p.kycPayWith === 'redeemed_balance') {
         // Users an admin has approved for balance payments can settle the one-time KYC fee
         // from their redeemed balance instead of the secure checkout. Everything below is
@@ -2115,6 +2129,7 @@ async function route(req, res) {
           withdrawal: withdrawal ? publicWithdrawal(withdrawal) : null,
           receipt: db.receipts.find(r => r.reference === ref),
           refundReceipt: withdrawal?.kycBypassRefundReference ? db.receipts.find(r => r.reference === withdrawal.kycBypassRefundReference) : null,
+          rejection: payment.rejectionCode ? { code: payment.rejectionCode, message: payment.rejectionReason } : null,
         });
       }
       return fail(res, 409, 'Payment is still being confirmed. Please return to the payment screen shortly.');

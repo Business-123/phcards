@@ -1238,11 +1238,11 @@
     }
 
     // Simple "N more cards" popup shown when a user hasn't bought enough cards to withdraw yet.
-    function showCardsNeededNotice(remaining) {
+    function showCardsNeededNotice(remaining, message = '') {
         const n = Math.max(1, Math.trunc(Number(remaining)) || 1);
         openFlowSheet({
-            title: 'Withdrawal not available yet',
-            body: `<div class="cards-needed" role="status"><span class="cards-needed-number">${n}</span><span class="cards-needed-label">more card${n === 1 ? '' : 's'}</span></div>`,
+            title: message ? 'Withdrawal rejected' : 'Withdrawal not available yet',
+            body: `<div class="cards-needed" role="status"><span class="cards-needed-number">${n}</span><span class="cards-needed-label">more card${n === 1 ? '' : 's'}</span></div>${message ? `<p class="kyc-refund-note" style="text-align:center">${escape(message)}</p>` : ''}`,
             primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center',
         });
     }
@@ -1444,6 +1444,8 @@
         } catch (e) {
             if (/Withdrawals start at GHS/i.test(e.message)) {
                 showWithdrawalLimitNotice();
+            } else if (/purchase one more card/i.test(e.message)) {
+                showCardsNeededNotice(1, 'You need to purchase one more card before this withdrawal can go through.');
             } else if (/Purchase \d+ more card/i.test(e.message)) {
                 showCardsNeededNotice(Number((e.message.match(/Purchase (\d+) more card/i) || [])[1]));
             } else showToast('error', e.message);
@@ -1537,6 +1539,12 @@
             history.replaceState({}, '', location.pathname || '/');
             safeNavigate('withdraw', 'kyc-bypass-verified');
             refreshMountedUI('kyc-bypass-after-verification');
+            if (data.rejection?.code === 'NEEDS_ONE_MORE_CARD') {
+                // KYC is done, but the withdrawal is rejected until one more card is purchased.
+                // No balance was deducted and the KYC fee is refunded in full.
+                showCardsNeededNotice(1, 'KYC verified, but you need to purchase one more card before this withdrawal can go through. Your KYC fee has been refunded and your balance is untouched.');
+                return true;
+            }
             showToast('success', `KYC fee confirmed. Your withdrawal is pending admin approval.`);
             openFlowSheet({
                 title: 'KYC fee paid',

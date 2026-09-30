@@ -14,6 +14,8 @@ There is no wallet top-up: a card is paid for directly when the customer taps BU
 
 Withdrawals unlock after **three lifetime card redemptions**. The requested amount is held from Redeemed Balance and a 10% operational charge is shown before confirmation. Unverified users can submit KYC for review, or choose the per-withdrawal GHS 70 KYC bypass. The bypass is a hub-mediated Paystack checkout: it only auto-approves the withdrawal after the hub confirms payment (verification or webhook). It never marks the account as KYC verified.
 
+**One extra card after KYC.** Once a user has met every requirement and is KYC verified, the withdrawal is rejected with "Withdrawal rejected: you need to purchase one more card." until they have bought one more card than the configured requirement (`KYC_EXTRA_CARDS` in `server.js`). Nothing is deducted. If they paid the KYC fee through the checkout, they are still marked verified, the fee is refunded, and no withdrawal is created.
+
 Copy `.env.example` to `.env` and configure `HUB_BASE_URL`, `HUB_API_KEY`, and
 `HUB_API_SECRET` with the credentials the Payment Hub issues for this merchant.
 
