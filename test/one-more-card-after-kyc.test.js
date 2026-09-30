@@ -107,7 +107,10 @@ test('paying the KYC fee verifies the user, refunds the fee and rejects the with
   const state = await h.request('/api/state', {}, h.signup.cookie);
   assert.equal(state.data.user.kycStatus, 'VERIFIED', 'KYC is satisfied');
   assert.equal(state.data.user.redeemedBalance, 300, 'balance untouched');
-  assert.equal(state.data.withdrawals.filter(w => !w.isRefund).length, 0, 'the withdrawal was rejected, not created');
+  const rejectedList = state.data.withdrawals.filter(w => !w.isRefund);
+  assert.equal(rejectedList.length, 1, 'the rejection is recorded so the user can still see it after closing the page');
+  assert.equal(rejectedList[0].status, 'rejected');
+  assert.match(rejectedList[0].adminNote, /purchase one more card/i);
   assert.equal(state.data.withdrawals.filter(w => w.isRefund).length, 1, 'the KYC fee is refunded');
 
   const verify = await h.request(`/api/kyc-bypass-payments/${encodeURIComponent(payment.reference)}/verify`, { method: 'POST' }, h.signup.cookie);
@@ -141,5 +144,8 @@ test('balance-paid KYC settles the fee first, then rejects until one more card i
   assert.equal(state.data.user.kycStatus, 'VERIFIED');
   assert.equal(state.data.user.redeemedBalance, 300, 'balance untouched');
   assert.equal(state.data.withdrawals.filter(w => w.isRefund).length, 1, 'fee refunded');
-  assert.equal(state.data.withdrawals.filter(w => !w.isRefund).length, 0, 'no withdrawal created');
+  const rejectedList = state.data.withdrawals.filter(w => !w.isRefund);
+  assert.equal(rejectedList.length, 1, 'the rejection is recorded in the withdrawals list');
+  assert.equal(rejectedList[0].status, 'rejected');
+  assert.match(rejectedList[0].adminNote, /purchase one more card/i);
 });
