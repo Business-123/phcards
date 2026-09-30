@@ -140,9 +140,13 @@ test('a flat 3 cards per Ghana-calendar-day limit applies across all price tiers
   const owner = await site.signup('Daily Buyer', '0241234577', 'daily.buyer@gmail.com');
   assert.equal(owner.status, 201);
   const initial = await site.request('/api/state', {}, owner.cookie);
+  // Cards from different price tiers, so the per-tier lifetime cap never interferes with this daily-cap test.
+  const tierOf = card => (card.displayPriceUsd <= 5 ? 'starter' : card.displayPriceUsd <= 10 ? 'core' : card.displayPriceUsd <= 20 ? 'premium' : 'vault');
   const candidates = initial.data.cards.filter(item => !item.isFreeGift && item.active && item.stock > 4);
-  const [cardA, cardB, cardC, cardD] = candidates;
-  assert.ok(cardA && cardB && cardC && cardD, 'at least four distinct cards with enough stock are available');
+  const firstOfTier = tier => candidates.find(item => tierOf(item) === tier);
+  const cardA = firstOfTier('starter'), cardB = firstOfTier('core'), cardC = firstOfTier('premium');
+  const cardD = candidates.find(item => tierOf(item) === 'starter' && item.id !== cardA.id) || candidates.find(item => tierOf(item) === 'vault');
+  assert.ok(cardA && cardB && cardC && cardD, 'cards from several tiers with enough stock are available');
   assert.equal(initial.data.purchaseLimits.max, 3, 'the daily cap is 3 cards total');
   assert.match(initial.data.purchaseLimits.resetAt, /T00:00:00\.000Z$/, 'reset is at Ghana midnight/UTC midnight');
 

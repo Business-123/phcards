@@ -120,6 +120,7 @@
         state.minWithdrawal = Number.isFinite(Number(data.minWithdrawal)) ? Number(data.minWithdrawal) : DEFAULT_MIN_WITHDRAWAL;
         state.withdrawalCardRequirement = Number.isFinite(Number(data.withdrawalCardRequirement)) ? Number(data.withdrawalCardRequirement) : DEFAULT_REDEEMED_CARDS_FOR_WITHDRAWAL;
         state.purchaseLimits = data.purchaseLimits || { date: '', max: 3, count: 0, resetAt: null };
+        state.closedTiers = Array.isArray(data.closedTiers) ? data.closedTiers : [];
         if (Number(data.kycBypassFee) > 0) KYC_BYPASS_FEE = Number(data.kycBypassFee);
         if (Number.isFinite(Number(data.operationalChargeRate)) && data.operationalChargeRate !== null && data.operationalChargeRate !== '') OPERATIONAL_CHARGE_RATE = Number(data.operationalChargeRate);
         state.withdrawals = data.withdrawals || [];
@@ -1232,6 +1233,16 @@
         return openFlowSheet({ title: 'Withdrawal limit not reached', body, primaryText: firstCard ? 'Buy your first card' : 'Ok', secondaryText: firstCard ? 'Later' : '', onPrimary: () => { closeFlowSheet(); if (firstCard) safeNavigate('shop', 'withdrawal-limit'); }, variant: 'center' });
     }
 
+    // Simple "N more cards" popup shown when a user hasn't bought enough cards to withdraw yet.
+    function showCardsNeededNotice(remaining) {
+        const n = Math.max(1, Math.trunc(Number(remaining)) || 1);
+        openFlowSheet({
+            title: 'Withdrawal not available yet',
+            body: `<div class="cards-needed" role="status"><span class="cards-needed-number">${n}</span><span class="cards-needed-label">more card${n === 1 ? '' : 's'}</span></div>`,
+            primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center',
+        });
+    }
+
     window.startWithdrawWizard = function () {
         if (!state.isLoggedIn) {
             showToast('warning', 'Please log in to request a withdrawal.');
@@ -1242,7 +1253,7 @@
         const requiredCards = requiredCardsForWithdrawal();
         if (purchasedCards < requiredCards) {
             const remaining = requiredCards - purchasedCards;
-            return openFlowSheet({ title: 'Withdrawal not available yet', body: `<p class="text-secondary">You need to purchase at least ${requiredCards} card${requiredCards === 1 ? '' : 's'} before requesting a withdrawal. Please purchase ${remaining} more card${remaining === 1 ? '' : 's'} and try again.</p>`, primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center' });
+            return showCardsNeededNotice(remaining);
         }
         if (!(state.methods || []).length) {
             showToast('warning', 'Add a withdrawal method first.');
@@ -1430,7 +1441,7 @@
             if (/Withdrawals start at GHS/i.test(e.message)) {
                 showWithdrawalLimitNotice();
             } else if (/Purchase \d+ more card/i.test(e.message)) {
-                openFlowSheet({ title: 'Withdrawal not available yet', body: `<p class="text-secondary">To request a withdrawal, please purchase at least ${requiredCardsForWithdrawal()} card${requiredCardsForWithdrawal() === 1 ? '' : 's'}. ${escape(e.message)}</p>`, primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center' });
+                showCardsNeededNotice(Number((e.message.match(/Purchase (\d+) more card/i) || [])[1]));
             } else showToast('error', e.message);
         } finally {
             busy(button, false);
@@ -2190,7 +2201,17 @@
         const grid = byId('shopGrid');
         const empty = byId('shopEmpty');
         if (!grid || !empty) return;
-        let filtered = [...(state.cards || [])];
+        // Tiers this user has used up (bought the admin-set number of cards from) are gone
+        // for good: their chips and cards never render again.
+        const closedTiers = state.closedTiers || [];
+        document.querySelectorAll('#priceFilterChips [data-price-filter]').forEach(chip => {
+            chip.classList.toggle('hidden', closedTiers.includes(chip.dataset.priceFilter));
+        });
+        if (closedTiers.includes(state.priceFilter)) {
+            state.priceFilter = 'all';
+            document.querySelectorAll('#priceFilterChips .shop-filter').forEach(c => c.classList.toggle('active', c.dataset.priceFilter === 'all'));
+        }
+        let filtered = (state.cards || []).filter(card => card.isFreeGift || !closedTiers.includes(purchasePriceKey(card)));
         const categoryFilter = state.categoryFilter ?? (SHOP_PRICE_RANGES.some(item => item.key === state.filter) ? 'all' : state.filter);
         const priceFilter = state.priceFilter ?? (SHOP_PRICE_RANGES.some(item => item.key === state.filter) ? state.filter : 'all');
         if (categoryFilter !== 'all') filtered = filtered.filter(card => card.category === categoryFilter);
@@ -2220,6 +2241,9 @@
                 empty.querySelector('h3').textContent = "You've reached today's purchase limit";
                 empty.querySelector('p').innerHTML = `You've bought ${max} cards today. New purchases open in <strong data-daily-countdown-card>${countdownText(Math.max(0, nextGhanaMidnight() - Date.now()))}</strong>.`;
                 startDailyPurchaseCountdown();
+            } else if (closedTiers.length >= SHOP_PRICE_RANGES.length) {
+                empty.querySelector('h3').textContent = 'No card tiers left';
+                empty.querySelector('p').textContent = "You've completed every price tier, so there are no more cards to buy.";
             } else {
                 empty.querySelector('h3').textContent = 'No cards found';
                 empty.querySelector('p').textContent = 'Try adjusting your search or filter.';

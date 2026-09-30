@@ -226,13 +226,14 @@
         { key: 'minWithdrawal', label: 'Withdrawal limit (minimum balance)', unit: 'GHS', step: '0.01', help: 'Smallest amount a user can withdraw, and the balance they need before withdrawing.' },
         { key: 'minPurchasedCardsForWithdrawal', label: 'Cards required to withdraw', unit: 'cards purchased', step: '1', help: 'How many cards a user must have purchased (free gifts do not count). 0 removes the requirement.' },
         { key: 'dailyPurchaseLimit', label: 'Daily purchase limit', unit: 'cards / day', step: '1', help: 'Maximum cards one user can buy per day, all tiers combined.' },
+        { key: 'tierPurchaseLimit', label: 'Purchases before a tier closes', unit: 'cards / tier', step: '1', help: 'After a user buys this many cards inside one price tier ($4–$5, $6–$10, $11–$20, $21–$50) that tier disappears for them permanently.' },
         { key: 'operationalChargePercent', label: 'Operational charge', unit: '%', step: '0.01', help: 'Deducted from every withdrawal.' },
         { key: 'kycBypassFee', label: 'KYC bypass fee', unit: 'GHS', step: '0.01', help: 'One-time refundable fee that verifies a user for good.' },
         { key: 'rewardMultiplierMin', label: 'Reward multiplier (min)', unit: '×', step: '0.01', help: 'Lowest reward multiplier applied to a card price.' },
         { key: 'rewardMultiplierMax', label: 'Reward multiplier (max)', unit: '×', step: '0.01', help: 'Highest reward multiplier applied to a card price.' },
     ];
     function settingsFormValues(s) {
-        return { minWithdrawal: Number(s.minWithdrawal ?? 100), minPurchasedCardsForWithdrawal: Number(s.minPurchasedCardsForWithdrawal ?? 3), dailyPurchaseLimit: Number(s.dailyPurchaseLimit ?? 3), operationalChargePercent: Math.round(Number(s.operationalChargeRate ?? 0.1) * 10000) / 100, kycBypassFee: Number(s.kycBypassFee ?? 70), rewardMultiplierMin: Number(s.rewardMultiplierMin ?? 3.52), rewardMultiplierMax: Number(s.rewardMultiplierMax ?? 4.42) };
+        return { minWithdrawal: Number(s.minWithdrawal ?? 100), minPurchasedCardsForWithdrawal: Number(s.minPurchasedCardsForWithdrawal ?? 3), dailyPurchaseLimit: Number(s.dailyPurchaseLimit ?? 3), tierPurchaseLimit: Number(s.tierPurchaseLimit ?? 2), operationalChargePercent: Math.round(Number(s.operationalChargeRate ?? 0.1) * 10000) / 100, kycBypassFee: Number(s.kycBypassFee ?? 70), rewardMultiplierMin: Number(s.rewardMultiplierMin ?? 3.52), rewardMultiplierMax: Number(s.rewardMultiplierMax ?? 4.42) };
     }
     function settingsPanel(s) {
         const values = settingsFormValues(s);

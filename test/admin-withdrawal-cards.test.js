@@ -106,10 +106,10 @@ test('admin can edit every setting and users see the new values', { timeout: 200
   };
   assert.equal((await admin('/api/admin/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'test-admin-password' }) })).response.status, 200);
 
-  const bad = [{ minWithdrawal: 0 }, { dailyPurchaseLimit: 1.5 }, { operationalChargeRate: 0.9 }, { kycBypassFee: -5 }, { rewardMultiplierMin: 9, rewardMultiplierMax: 2 }, {}];
+  const bad = [{ minWithdrawal: 0 }, { dailyPurchaseLimit: 1.5 }, { tierPurchaseLimit: 0 }, { tierPurchaseLimit: 2.5 }, { operationalChargeRate: 0.9 }, { kycBypassFee: -5 }, { rewardMultiplierMin: 9, rewardMultiplierMax: 2 }, {}];
   for (const payload of bad) assert.equal((await admin('/api/admin/settings', { method: 'POST', body: JSON.stringify(payload) })).response.status, 400, JSON.stringify(payload));
 
-  const payload = { minWithdrawal: 50, minPurchasedCardsForWithdrawal: 2, dailyPurchaseLimit: 5, operationalChargeRate: 0.05, kycBypassFee: 40, rewardMultiplierMin: 3, rewardMultiplierMax: 4 };
+  const payload = { minWithdrawal: 50, minPurchasedCardsForWithdrawal: 2, dailyPurchaseLimit: 5, tierPurchaseLimit: 4, operationalChargeRate: 0.05, kycBypassFee: 40, rewardMultiplierMin: 3, rewardMultiplierMax: 4 };
   const saved = await admin('/api/admin/settings', { method: 'POST', body: JSON.stringify(payload) });
   assert.equal(saved.response.status, 200);
   const summary = await admin('/api/admin/summary');
