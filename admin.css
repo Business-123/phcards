@@ -217,3 +217,14 @@ td small { display: block; margin-top: 4px; color: var(--faint); font-size: 9px;
 @media (max-width: 760px) { .settings-form { grid-template-columns: 1fr; } }
 
 .tiny-button.active { background: var(--gold); color: #0a0a0f; border-color: var(--gold); }
+
+/* Card tier switches (Settings) */
+.tier-list { display: grid; gap: 10px; }
+.tier-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border: 1px solid var(--line, rgba(255,255,255,.1)); border-radius: 12px; }
+.tier-info strong { display: block; font-size: 14px; }
+.tier-info small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+.tier-switch { position: relative; flex: none; width: 46px; height: 26px; border: 0; border-radius: 999px; background: rgba(128,128,140,.45); cursor: pointer; transition: background .15s; padding: 0; }
+.tier-switch span { position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.tier-switch.on { background: var(--gold); }
+.tier-switch.on span { transform: translateX(20px); }
+.tier-switch:disabled { opacity: .5; cursor: not-allowed; }

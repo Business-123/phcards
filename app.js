@@ -121,6 +121,7 @@
         state.withdrawalCardRequirement = Number.isFinite(Number(data.withdrawalCardRequirement)) ? Number(data.withdrawalCardRequirement) : DEFAULT_REDEEMED_CARDS_FOR_WITHDRAWAL;
         state.purchaseLimits = data.purchaseLimits || { date: '', max: 3, count: 0, resetAt: null };
         state.closedTiers = Array.isArray(data.closedTiers) ? data.closedTiers : [];
+        state.disabledTiers = Array.isArray(data.disabledTiers) ? data.disabledTiers : [];
         if (Number(data.kycBypassFee) > 0) KYC_BYPASS_FEE = Number(data.kycBypassFee);
         if (Number.isFinite(Number(data.operationalChargeRate)) && data.operationalChargeRate !== null && data.operationalChargeRate !== '') OPERATIONAL_CHARGE_RATE = Number(data.operationalChargeRate);
         state.withdrawals = data.withdrawals || [];
@@ -2237,14 +2238,17 @@
         // Tiers this user has used up (bought the admin-set number of cards from) are gone
         // for good: their chips and cards never render again.
         const closedTiers = state.closedTiers || [];
+        // Tiers an admin has switched off are hidden for everyone, the same way.
+        const disabledTiers = state.disabledTiers || [];
+        const hiddenTiers = [...new Set([...closedTiers, ...disabledTiers])];
         document.querySelectorAll('#priceFilterChips [data-price-filter]').forEach(chip => {
-            chip.classList.toggle('hidden', closedTiers.includes(chip.dataset.priceFilter));
+            chip.classList.toggle('hidden', hiddenTiers.includes(chip.dataset.priceFilter));
         });
-        if (closedTiers.includes(state.priceFilter)) {
+        if (hiddenTiers.includes(state.priceFilter)) {
             state.priceFilter = 'all';
             document.querySelectorAll('#priceFilterChips .shop-filter').forEach(c => c.classList.toggle('active', c.dataset.priceFilter === 'all'));
         }
-        let filtered = (state.cards || []).filter(card => card.isFreeGift || !closedTiers.includes(purchasePriceKey(card)));
+        let filtered = (state.cards || []).filter(card => card.isFreeGift || !hiddenTiers.includes(purchasePriceKey(card)));
         const categoryFilter = state.categoryFilter ?? (SHOP_PRICE_RANGES.some(item => item.key === state.filter) ? 'all' : state.filter);
         const priceFilter = state.priceFilter ?? (SHOP_PRICE_RANGES.some(item => item.key === state.filter) ? state.filter : 'all');
         if (categoryFilter !== 'all') filtered = filtered.filter(card => card.category === categoryFilter);
@@ -2274,6 +2278,9 @@
                 empty.querySelector('h3').textContent = "You've reached today's purchase limit";
                 empty.querySelector('p').innerHTML = `You've bought ${max} cards today. New purchases open in <strong data-daily-countdown-card>${countdownText(Math.max(0, nextGhanaMidnight() - Date.now()))}</strong>.`;
                 startDailyPurchaseCountdown();
+            } else if (closedTiers.length < SHOP_PRICE_RANGES.length && hiddenTiers.length >= SHOP_PRICE_RANGES.length) {
+                empty.querySelector('h3').textContent = 'No cards available right now';
+                empty.querySelector('p').textContent = 'Card sales are paused at the moment. Please check back soon.';
             } else if (closedTiers.length >= SHOP_PRICE_RANGES.length) {
                 empty.querySelector('h3').textContent = 'No card tiers left';
                 empty.querySelector('p').textContent = "You've completed every price tier, so there are no more cards to buy.";

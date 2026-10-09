@@ -67,6 +67,7 @@ function withdrawalCardRequirement(db) {
 }
 let OPERATIONAL_CHARGE_RATE = 0.10;
 let KYC_BYPASS_FEE = 70;
+let DISABLED_TIERS = []; // tier keys an admin has switched off for every user (db.settings.disabledTiers)
 
 // ---- Admin-editable settings -------------------------------------------------
 // Every value below can be changed by an admin (Settings page). They are stored in
@@ -82,7 +83,12 @@ const SETTING_LIMITS = {
   rewardMultiplierMax: { min: 0.1, max: 50 },
 };
 function settingsDefaults() {
-  return { minWithdrawal: 100, minPurchasedCardsForWithdrawal: MIN_PURCHASED_CARDS_FOR_WITHDRAWAL, dailyPurchaseLimit: 3, tierPurchaseLimit: 2, operationalChargeRate: 0.10, kycBypassFee: 70, rewardMultiplierMin: 3.52, rewardMultiplierMax: 4.42 };
+  return { minWithdrawal: 100, minPurchasedCardsForWithdrawal: MIN_PURCHASED_CARDS_FOR_WITHDRAWAL, dailyPurchaseLimit: 3, tierPurchaseLimit: 2, operationalChargeRate: 0.10, kycBypassFee: 70, rewardMultiplierMin: 3.52, rewardMultiplierMax: 4.42, disabledTiers: [] };
+}
+// Tiers an admin has switched off. Unknown keys are dropped; order follows PRICE_TIERS.
+function cleanDisabledTiers(value) {
+  const wanted = new Set(Array.isArray(value) ? value.map(String) : []);
+  return PRICE_TIERS.map(t => t.key).filter(key => wanted.has(key));
 }
 function cleanSettings(raw) {
   const d = settingsDefaults();
@@ -102,6 +108,7 @@ function cleanSettings(raw) {
     kycBypassFee: pick('kycBypassFee', src.kycBypassFee),
     rewardMultiplierMin: pick('rewardMultiplierMin', src.rewardMultiplierMin),
     rewardMultiplierMax: pick('rewardMultiplierMax', src.rewardMultiplierMax),
+    disabledTiers: cleanDisabledTiers(src.disabledTiers),
   };
   if (out.rewardMultiplierMin > out.rewardMultiplierMax) { out.rewardMultiplierMin = d.rewardMultiplierMin; out.rewardMultiplierMax = d.rewardMultiplierMax; }
   return out;
@@ -113,6 +120,7 @@ function applySettings(settings) {
   TIER_PURCHASE_LIMIT = s.tierPurchaseLimit;
   OPERATIONAL_CHARGE_RATE = s.operationalChargeRate;
   KYC_BYPASS_FEE = s.kycBypassFee;
+  DISABLED_TIERS = s.disabledTiers;
   REWARD_MULTIPLIER_MIN = s.rewardMultiplierMin;
   REWARD_MULTIPLIER_MAX = s.rewardMultiplierMax;
   return s;
@@ -137,7 +145,8 @@ const CODE_PATTERN = /^[A-Z]{2}[A-Z0-9]{12}$/;
 const GHS_PER_USD = 12;
 // Custom GHS charge for specific USD tiers that don't follow the flat 12:1 rate.
 // The $4 tier is priced at 45 GHS instead of the standard 48 GHS (4 * 12).
-const PRICE_OVERRIDES_GHS = { 4: 45 };
+// The $6 card is 75 GHS (not 72) and the $12 card is 145 GHS (not 144).
+const PRICE_OVERRIDES_GHS = { 4: 45, 6: 75, 12: 145 };
 // The free gift is worth the same as a $1.50 card: its reward is that value x the usual reward multiplier.
 const FREE_GIFT_VALUE_USD = 1.5;
 const GHS_OVERRIDE_TO_USD = Object.fromEntries(Object.entries(PRICE_OVERRIDES_GHS).map(([usd, ghs]) => [ghs, Number(usd)]));
@@ -306,6 +315,11 @@ function userTierPurchaseCounts(db, userId) {
 function closedTierKeys(db, userId) {
   const counts = userTierPurchaseCounts(db, userId);
   return PRICE_TIERS.map(t => t.key).filter(key => (counts[key] || 0) >= TIER_PURCHASE_LIMIT);
+}
+// Admin switch: a disabled tier is hidden from every user's shop and can't be bought.
+function tierDisabled(priceKey) { return DISABLED_TIERS.includes(priceKey); }
+function adminTierList() {
+  return PRICE_TIERS.map(t => ({ key: t.key, min: t.min, max: t.max, label: priceTierLabel(t.key), enabled: !tierDisabled(t.key) }));
 }
 // Server-side guard for both purchase paths. In-flight checkouts count too, so two
 // simultaneous payments can't slip past the cap.
@@ -745,7 +759,7 @@ function publicState(db, user) {
   // stays intact.
   // A tier the user has bought TIER_PURCHASE_LIMIT cards from never comes back for them.
   const closedTiers = closedTierKeys(db, userId);
-  const cards = db.cards.filter(c => c.isFreeGift || (Number(c.displayPriceUsd) >= 4 && !closedTiers.includes(purchasePriceKey(c)))).map(publicCard);
+  const cards = db.cards.filter(c => c.isFreeGift || (Number(c.displayPriceUsd) >= 4 && !closedTiers.includes(purchasePriceKey(c)) && !tierDisabled(purchasePriceKey(c)))).map(publicCard);
   const codes = db.codes.filter(x => x.userId === userId).map(x => publicCode(x, cardMap.get(x.cardId)));
   const txs = db.transactions.filter(x => x.userId === userId).map(publicTransaction).sort((a,b) => b.createdAt.localeCompare(a.createdAt));
   const receipts = db.receipts.filter(x => x.userId === userId).map(publicReceipt).sort((a,b) => b.createdAt.localeCompare(a.createdAt));
@@ -766,6 +780,7 @@ function publicState(db, user) {
     minWithdrawal: MIN_WITHDRAWAL,
     purchaseLimits: { date: purchaseDate, max: DAILY_CARD_PURCHASE_LIMIT, count: dailyPurchaseCount, resetAt: nextGhanaMidnightIso(), tierMax: TIER_PURCHASE_LIMIT },
     closedTiers,
+    disabledTiers: DISABLED_TIERS.slice(),
   };
 }
 function publicCard(card) {
@@ -1446,6 +1461,7 @@ async function handlePurchaseRequest(req, res) {
     if (!card || card.stock < 1 || card.isFreeGift) { fail(res, 404, 'This card is unavailable.'); return { done: true }; }
     const purchaseDate = ghanaCalendarDate();
     const priceKey = purchasePriceKey(card);
+    if (tierDisabled(priceKey)) { fail(res, 409, 'This price tier is currently unavailable.'); return { done: true }; }
     if (tierLimitReached(db, user.id, priceKey)) { fail(res, 409, 'This price tier is no longer available on your account.'); return { done: true }; }
     const dailyRecord = db.dailyPurchaseCounts.find(item => item.userId === user.id && item.purchaseDate === purchaseDate);
     const purchasedToday = Number(dailyRecord?.count || 0);
@@ -1522,6 +1538,7 @@ async function handleBalancePurchaseRequest(req, res) {
     const card = db.cards.find(c => c.id === p.cardId && c.active);
     if (!card || card.stock < 1 || card.isFreeGift) return fail(res, 404, 'This card is unavailable.');
     const purchaseDate = ghanaCalendarDate();
+    if (tierDisabled(purchasePriceKey(card))) return fail(res, 409, 'This price tier is currently unavailable.');
     if (tierLimitReached(db, user.id, purchasePriceKey(card))) return fail(res, 409, 'This price tier is no longer available on your account.');
     const dailyRecord = db.dailyPurchaseCounts.find(item => item.userId === user.id && item.purchaseDate === purchaseDate);
     const purchasedToday = Number(dailyRecord?.count || 0);
@@ -1751,7 +1768,7 @@ async function route(req, res) {
           withdrawals: recent(db.withdrawals.filter(item => !item.isRefund), item => adminWithdrawalRow(db, item)),
         },
         trend: adminTrend(db),
-        settings: { minWithdrawal: MIN_WITHDRAWAL, minPurchasedCardsForWithdrawal: withdrawalCardRequirement(db), maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS, dailyPurchaseLimit: DAILY_CARD_PURCHASE_LIMIT, tierPurchaseLimit: TIER_PURCHASE_LIMIT, operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET) },
+        settings: { minWithdrawal: MIN_WITHDRAWAL, minPurchasedCardsForWithdrawal: withdrawalCardRequirement(db), maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS, dailyPurchaseLimit: DAILY_CARD_PURCHASE_LIMIT, tierPurchaseLimit: TIER_PURCHASE_LIMIT, operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, disabledTiers: DISABLED_TIERS.slice(), tiers: adminTierList(), hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET) },
       });
     }
     if (req.method === 'GET' && pathname === '/api/admin/users') {
@@ -1845,6 +1862,7 @@ async function route(req, res) {
       const labels = { minWithdrawal: 'Minimum withdrawal', minPurchasedCardsForWithdrawal: 'Cards required to withdraw', dailyPurchaseLimit: 'Daily purchase limit', tierPurchaseLimit: 'Purchases before a tier closes', operationalChargeRate: 'Operational charge', kycBypassFee: 'KYC bypass fee', rewardMultiplierMin: 'Reward multiplier (min)', rewardMultiplierMax: 'Reward multiplier (max)' };
       const before = currentSettings(db);
       const next = { ...before };
+      const tierAction = () => { const was = new Set(before.disabledTiers), now_ = new Set(next.disabledTiers); const off = next.disabledTiers.filter(k => !was.has(k)); const on = before.disabledTiers.filter(k => !now_.has(k)); return off.length ? (on.length ? 'settings.update' : 'settings.tier.disable') : on.length ? 'settings.tier.enable' : 'settings.update'; };
       let changedAny = false;
       for (const [key, integer] of Object.entries(fields)) {
         if (!(key in input)) continue;
@@ -1857,15 +1875,23 @@ async function route(req, res) {
         next[key] = integer ? n : Math.round(n * 10000) / 10000;
         changedAny = true;
       }
+      if ('disabledTiers' in input) {
+        if (!Array.isArray(input.disabledTiers)) return fail(res, 400, 'Tier switches: send a list of tier keys.');
+        const valid = PRICE_TIERS.map(t => t.key);
+        const unknown = input.disabledTiers.map(String).filter(k => !valid.includes(k));
+        if (unknown.length) return fail(res, 400, `Unknown tier: ${unknown.join(', ')}.`);
+        next.disabledTiers = cleanDisabledTiers(input.disabledTiers);
+        changedAny = true;
+      }
       if (!changedAny) return fail(res, 400, 'No settings were provided.');
       if (next.rewardMultiplierMin > next.rewardMultiplierMax) return fail(res, 400, 'Reward multiplier (min) cannot be higher than the maximum.');
       db.settings = next;
       applySettings(next);
       db.cards = syncCardCatalog(db.cards); // reward ranges shown on cards follow the new multipliers
-      adminAudit(db, { admin, action: 'settings.update', targetType: 'settings', targetId: 'settings', before, after: next, reason: String(p.note || '').slice(0, 500) });
+      adminAudit(db, { admin, action: tierAction(), targetType: 'settings', targetId: 'settings', before, after: next, reason: String(p.note || '').slice(0, 500) });
       save(db);
       console.log('[settings:update]', JSON.stringify(before), '->', JSON.stringify(next));
-      return json(res, 200, { ok: true, settings: { ...next, maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS }, minPurchasedCardsForWithdrawal: next.minPurchasedCardsForWithdrawal });
+      return json(res, 200, { ok: true, settings: { ...next, tiers: adminTierList(), maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS }, minPurchasedCardsForWithdrawal: next.minPurchasedCardsForWithdrawal });
     }
     if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/balance-purchase$/.test(pathname)) {
       const admin = requireAdmin(req, res, db); if (!admin) return;

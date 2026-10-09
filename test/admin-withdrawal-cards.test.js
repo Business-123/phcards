@@ -119,5 +119,5 @@ test('admin can edit every setting and users see the new values', { timeout: 200
   assert.equal(config.kycBypassFee, 40);
   assert.equal(config.operationalChargeRate, 0.05);
   const persisted = JSON.parse(fs.readFileSync(dataFile, 'utf8')).settings;
-  assert.deepEqual({ ...persisted }, payload, 'persisted to disk');
+  assert.deepEqual({ ...persisted }, { ...payload, disabledTiers: [] }, 'persisted to disk');
 });

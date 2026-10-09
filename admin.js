@@ -242,6 +242,26 @@
             <div class="settings-form" id="settingsForm">${SETTING_FIELDS.map(f => `<label class="setting-field"><span>${escape(f.label)}</span><div class="setting-input"><input type="number" inputmode="decimal" step="${f.step}" data-setting="${f.key}" data-original="${values[f.key]}" value="${values[f.key]}"><em>${escape(f.unit)}</em></div><small>${escape(f.help)}</small></label>`).join('')}</div>
             <div style="display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap"><button type="button" class="btn-save-req" id="settingsSave" disabled>Save changes</button><button type="button" class="btn-save-req" id="settingsReset" style="background:transparent" disabled>Discard</button><span id="settingsMsg" style="color:var(--muted);font-size:12px">No unsaved changes.</span></div></div>`;
     }
+    // ---- Card tiers: each tier can be switched off for every user ----
+    const FALLBACK_TIERS = [{ key: 'starter', label: '$4–$5' }, { key: 'core', label: '$6–$10' }, { key: 'premium', label: '$11–$20' }, { key: 'vault', label: '$21–$50' }];
+    function tiersPanel(s) {
+        const tiers = Array.isArray(s.tiers) && s.tiers.length ? s.tiers : FALLBACK_TIERS;
+        const disabled = new Set(Array.isArray(s.disabledTiers) ? s.disabledTiers : []);
+        const rows = tiers.map(t => { const on = !disabled.has(t.key); return `<div class="tier-row"><div class="tier-info"><strong>${escape(t.label)} tier</strong><small>${on ? 'Visible to users and available to buy.' : 'Hidden from users. New purchases are blocked.'}</small></div><button type="button" class="tier-switch${on ? ' on' : ''}" role="switch" aria-checked="${on}" aria-label="${escape(t.label)} tier" data-toggle-tier="${escape(t.key)}" data-enabled="${on ? '1' : '0'}"><span></span></button></div>`; }).join('');
+        return `<div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Card tiers</h3></div><p style="color:var(--muted);line-height:1.7;margin:0 0 14px">Switch a tier off to remove it from every user's shop right away. Payments already in progress still complete. Switch it back on to restore it.</p><div class="tier-list" id="tierList">${rows}</div></div>`;
+    }
+    async function toggleTier(button) {
+        const key = button.dataset.toggleTier; const enable = button.dataset.enabled !== '1';
+        const current = new Set(state.summary?.settings?.disabledTiers || []);
+        if (enable) current.delete(key); else current.add(key);
+        document.querySelectorAll('#tierList [data-toggle-tier]').forEach(b => { b.disabled = true; });
+        try {
+            const result = await api('/api/admin/settings', { method: 'POST', body: JSON.stringify({ disabledTiers: [...current], note: enable ? `Enabled tier ${key}` : `Disabled tier ${key}` }) });
+            state.summary.settings = { ...(state.summary.settings || {}), ...result.settings };
+            toast(enable ? 'Tier enabled. Users can see it again.' : 'Tier disabled. It is now hidden from users.');
+            render('settings');
+        } catch (error) { toast(error.message); document.querySelectorAll('#tierList [data-toggle-tier]').forEach(b => { b.disabled = false; }); }
+    }
     function settingsFormState() {
         const inputs = [...document.querySelectorAll('#settingsForm [data-setting]')];
         const changed = inputs.filter(i => i.value !== i.dataset.original);
@@ -276,7 +296,7 @@
             render('settings');
         } catch (error) { toast(error.message); syncSettingsControls(); }
     }
-    function renderSettings() { const s = state.summary?.settings || {}; return pageHeading('Settings', 'Operational configuration. Every value below can be edited.') + settingsPanel(s) + `<div class="settings-grid" style="margin-top:16px"><div class="setting"><span>Payment service</span><strong>${s.hubConfigured ? 'Configured' : 'Not configured'}</strong></div></div><div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Financial safety</h3></div><p style="color:var(--muted);line-height:1.7;margin:0">Direct balance editing, payment status editing, transaction editing, and environment-secret editing are not available in this console. Corrections must be represented by controlled backend workflows and audited compensating records.</p></div>`; }
+    function renderSettings() { const s = state.summary?.settings || {}; return pageHeading('Settings', 'Operational configuration. Every value below can be edited.') + tiersPanel(s) + settingsPanel(s) + `<div class="settings-grid" style="margin-top:16px"><div class="setting"><span>Payment service</span><strong>${s.hubConfigured ? 'Configured' : 'Not configured'}</strong></div></div><div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Financial safety</h3></div><p style="color:var(--muted);line-height:1.7;margin:0">Direct balance editing, payment status editing, transaction editing, and environment-secret editing are not available in this console. Corrections must be represented by controlled backend workflows and audited compensating records.</p></div>`; }
     function renderReconciliation() { return pageHeading('Payment reconciliation', 'Compare app and Payment Hub references before investigating a top-up.') + `<section class="panel"><div class="panel-heading"><h3>Open a deposit from the Deposits page</h3></div><p style="margin:0;color:var(--muted);line-height:1.7">Deposits store the Payment Hub / Paystack reference alongside the local record, so the console clearly labels any unavailable external data instead of inventing a status.</p><button class="primary-button" style="margin-top:18px" data-go="deposits">View deposits</button></section>`; }
 
     async function openDetail(type, id) {
@@ -302,6 +322,8 @@
     document.addEventListener('click', event => {
         const balanceBtn = event.target.closest('[data-toggle-balance]');
         if (balanceBtn) return toggleBalancePurchase(balanceBtn);
+        const tierBtn = event.target.closest('[data-toggle-tier]');
+        if (tierBtn) return toggleTier(tierBtn);
         if (event.target.closest('#settingsSave')) return saveSettings();
         if (event.target.closest('#settingsReset')) { document.querySelectorAll('#settingsForm [data-setting]').forEach(i => { i.value = i.dataset.original; }); return syncSettingsControls(); }
         const navButton = event.target.closest('[data-view]'); if (navButton) return nav(navButton.dataset.view);
