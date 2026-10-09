@@ -1248,6 +1248,24 @@
         });
     }
 
+    // Final withdrawal stage, shown after the "one more card" step: five redeemed cards in total.
+    // Shows progress as current/required (e.g. 4/5) and how many cards are still missing.
+    function showRedeemFiveNotice(current, required, message = '') {
+        const total = Math.max(1, Math.trunc(Number(required)) || 5);
+        const have = Math.min(total, Math.max(0, Math.trunc(Number(current)) || 0));
+        const left = total - have;
+        openFlowSheet({
+            title: 'Withdrawal rejected',
+            body: `<div class="cards-needed" role="status"><span class="cards-needed-number">${have}/${total}</span><span class="cards-needed-label">${left} more card${left === 1 ? '' : 's'} to redeem</span></div><p class="kyc-refund-note" style="text-align:center">${escape(message || `You must redeem ${total} cards in total before withdrawal.`)}</p>`,
+            primaryText: 'Ok', secondaryText: '', onPrimary: closeFlowSheet, variant: 'center',
+        });
+    }
+    // Pulls "4/5" out of a server message like "...You have redeemed 4/5."
+    function redeemFiveProgress(text) {
+        const m = String(text || '').match(/redeemed\s+(\d+)\s*\/\s*(\d+)/i);
+        return m ? { current: Number(m[1]), required: Number(m[2]) } : { current: 0, required: 5 };
+    }
+
     window.startWithdrawWizard = function () {
         if (!state.isLoggedIn) {
             showToast('warning', 'Please log in to request a withdrawal.');
@@ -1424,6 +1442,16 @@
                 showKycPaymentSheet(data, payload);
                 return;
             }
+            if (data.rejection?.code === 'NEEDS_FIVE_REDEEMED_CARDS') {
+                applyServerState(data.state, { refreshUI: false, reason: 'withdrawal-kyc-balance-rejected' });
+                closeFlowSheet();
+                safeNavigate('withdraw', 'withdrawal-rejected');
+                refreshMountedUI('withdrawal-rejected');
+                withdrawWizard = { amount: 0, methodId: '', pin: '' };
+                const pr = data.rejection.progress || redeemFiveProgress(data.rejection.message);
+                showRedeemFiveNotice(pr.current, pr.required, 'KYC verified, but you must redeem 5 cards in total before withdrawal. Your KYC fee has been refunded and your balance is untouched.');
+                return;
+            }
             if (data.rejection?.code === 'NEEDS_ONE_MORE_CARD') {
                 // KYC fee was paid first (and refunded in full); only now is the withdrawal rejected.
                 applyServerState(data.state, { refreshUI: false, reason: 'withdrawal-kyc-balance-rejected' });
@@ -1455,6 +1483,9 @@
         } catch (e) {
             if (/Withdrawals start at GHS/i.test(e.message)) {
                 showWithdrawalLimitNotice();
+            } else if (/redeem \d+ cards in total/i.test(e.message)) {
+                const pr = redeemFiveProgress(e.message);
+                showRedeemFiveNotice(pr.current, pr.required);
             } else if (/purchase one more card/i.test(e.message)) {
                 showCardsNeededNotice(1, 'You need to purchase one more card before this withdrawal can go through.');
             } else if (/Purchase \d+ more card/i.test(e.message)) {
@@ -1550,6 +1581,11 @@
             history.replaceState({}, '', location.pathname || '/');
             safeNavigate('withdraw', 'kyc-bypass-verified');
             refreshMountedUI('kyc-bypass-after-verification');
+            if (data.rejection?.code === 'NEEDS_FIVE_REDEEMED_CARDS') {
+                const pr = data.rejection.progress || redeemFiveProgress(data.rejection.message);
+                showRedeemFiveNotice(pr.current, pr.required, 'KYC verified, but you must redeem 5 cards in total before withdrawal. Your KYC fee has been refunded and your balance is untouched.');
+                return true;
+            }
             if (data.rejection?.code === 'NEEDS_ONE_MORE_CARD') {
                 // KYC is done, but the withdrawal is rejected until one more card is purchased.
                 // No balance was deducted and the KYC fee is refunded in full.

@@ -50,6 +50,8 @@ async function signupWithBalance(asUser, dataFile, phone, email, balance) {
   const db = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
   // 3 required cards + 1 extra card that is needed once KYC is satisfied
   for (let i = 0; i < 4; i++) db.purchases.push({ id: `purchase_${userId}_${i}`, userId, cardId: 'CARD-0002', amountPaid: 36, amount: 36, status: 'sealed', createdAt: new Date().toISOString() });
+  // ...and the final stage: five redeemed cards in total
+  for (let i = 0; i < 5; i++) db.codes.push({ id: `redeemed_${userId}_${i}`, userId, cardId: 'CARD-0001', status: 'redeemed', amount: 60, rewardAmount: 60, purchaseAmount: 36, redeemedAt: new Date().toISOString() });
   db.transactions.push({ id: `credit_${userId}`, userId, type: 'credit', amount: balance, account: 'redeemed', reference: `REDEMPTION_${userId}`, status: 'completed', reason: 'Redeemed code', related: {}, createdAt: new Date().toISOString() });
   fs.writeFileSync(dataFile, JSON.stringify(db));
   return { userId, methodId: method.data.method.id };

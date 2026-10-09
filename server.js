@@ -509,6 +509,30 @@ const ONE_MORE_CARD_MESSAGE = 'Withdrawal rejected: you need to purchase one mor
 function needsExtraCardAfterKyc(db, userId) {
   return purchasedCardsCount(db, userId) < withdrawalCardRequirement(db) + KYC_EXTRA_CARDS;
 }
+// Final stage, shown once the "one more card" step is satisfied: the user must have redeemed
+// FINAL_REDEEMED_CARDS cards in total. The free welcome gift card counts as a redeemed card.
+const FINAL_REDEEMED_CARDS = 5;
+const FINAL_REDEEMED_CODE = 'NEEDS_FIVE_REDEEMED_CARDS';
+// The single source of truth for what blocks a verified user from withdrawing, in order.
+// Returns null when nothing blocks them. `progress` is what the client shows as "4/5".
+function withdrawalRejectionAfterKyc(db, userId) {
+  if (needsExtraCardAfterKyc(db, userId)) return { code: ONE_MORE_CARD_CODE, message: ONE_MORE_CARD_MESSAGE };
+  const redeemed = redeemedCardsCount(db, userId);
+  if (redeemed < FINAL_REDEEMED_CARDS) {
+    return {
+      code: FINAL_REDEEMED_CODE,
+      message: `Withdrawal rejected: you must redeem ${FINAL_REDEEMED_CARDS} cards in total before withdrawal. You have redeemed ${redeemed}/${FINAL_REDEEMED_CARDS}.`,
+      progress: { current: redeemed, required: FINAL_REDEEMED_CARDS },
+    };
+  }
+  return null;
+}
+function applyRejection(payment, rejection) {
+  payment.rejectionCode = rejection.code; payment.rejectionReason = rejection.message; payment.rejectionProgress = rejection.progress || null;
+}
+function rejectionPayload(rejection) {
+  return { code: rejection.code, message: rejection.message, ...(rejection.progress ? { progress: rejection.progress } : {}) };
+}
 function normalizeWithdrawalRecord(withdrawal) {
   const requestedAmount = money(withdrawal.requestedAmount ?? withdrawal.amount ?? 0);
   const isRefund = Boolean(withdrawal.isRefund || withdrawal.refundType === 'KYC_FEE_REFUND');
@@ -1093,7 +1117,8 @@ function createWithdrawalFromKycPayment(db, payment) {
   const user = db.users.find(item => item.id === payment.userId);
   if (!intent || !user) return null;
   // KYC is now satisfied (the fee was paid). Reject the withdrawal if the extra card is missing.
-  if (needsExtraCardAfterKyc(db, user.id)) { payment.rejectionCode = ONE_MORE_CARD_CODE; payment.rejectionReason = ONE_MORE_CARD_MESSAGE; return null; }
+  const blocked = withdrawalRejectionAfterKyc(db, user.id);
+  if (blocked) { applyRejection(payment, blocked); return null; }
   const method = db.methods.find(item => item.id === intent.methodId && item.userId === user.id);
   if (!method || Number(user.redeemedBalance) < Number(intent.requestedAmount)) return null;
   const ref = uniqueReference(db, 'WDL');
@@ -1851,7 +1876,7 @@ async function route(req, res) {
     }
     if (req.method === 'POST' && /^\/api\/admin\/withdrawals\/[^/]+\/approve$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const ref = decodeURIComponent(pathname.split('/')[4]); const withdrawal = db.withdrawals.find(item => item.reference === ref); if (!withdrawal) return fail(res, 404, 'Withdrawal was not found.'); const before = { ...withdrawal }; const p = await body(req); const approved = approveWithdrawal(db, withdrawal, p.note); adminAudit(db, { admin, action: 'withdrawal.approve', targetType: 'withdrawal', targetId: ref, before, after: { ...withdrawal }, reason: p.note }); save(db); console.log('[withdrawal:approved]', ref); return json(res, 200, { ok: true, withdrawal: publicWithdrawal(approved.withdrawal), transaction: approved.transaction && publicTransaction(approved.transaction), receipt: approved.receipt && publicReceipt(approved.receipt) }); }
     if (req.method === 'POST' && /^\/api\/admin\/withdrawals\/[^/]+\/reject$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const ref = decodeURIComponent(pathname.split('/')[4]); const withdrawal = db.withdrawals.find(item => item.reference === ref); if (!withdrawal) return fail(res, 404, 'Withdrawal was not found.'); const before = { ...withdrawal }; const p = await body(req); const rejected = rejectWithdrawal(db, withdrawal, p.note); adminAudit(db, { admin, action: 'withdrawal.reject', targetType: 'withdrawal', targetId: ref, before, after: { ...withdrawal }, reason: p.note }); save(db); console.log('[withdrawal:rejected]', ref); return json(res, 200, { ok: true, withdrawal: publicWithdrawal(rejected.withdrawal), transaction: rejected.transaction && publicTransaction(rejected.transaction), receipt: rejected.receipt && publicReceipt(rejected.receipt) }); }
-    if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/kyc\/verify$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const userId = decodeURIComponent(pathname.split('/')[4]); const target = db.users.find(item => item.id === userId); if (!target) return fail(res, 404, 'User was not found.'); const p = await body(req); const before = { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt }; target.kycStatus = KYC_STATUS.VERIFIED; target.kycVerifiedAt = now(); const released = markWithdrawalKycReady(db, target.id, p.note); if (needsExtraCardAfterKyc(db, target.id)) { released.forEach(item => { try { rejectWithdrawal(db, item, ONE_MORE_CARD_MESSAGE); } catch (e) { console.error('[kyc:extra-card-reject-failed]', item.reference, e.message); } }); } adminAudit(db, { admin, action: 'kyc.verify', targetType: 'user', targetId: userId, before, after: { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt, releasedWithdrawals: released.map(item => item.reference) }, reason: p.note }); save(db); console.log('[kyc:verified]', userId, released.length); return json(res, 200, { ok: true, user: adminSafeUser(target, db), releasedWithdrawals: released.map(publicWithdrawal) }); }
+    if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/kyc\/verify$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const userId = decodeURIComponent(pathname.split('/')[4]); const target = db.users.find(item => item.id === userId); if (!target) return fail(res, 404, 'User was not found.'); const p = await body(req); const before = { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt }; target.kycStatus = KYC_STATUS.VERIFIED; target.kycVerifiedAt = now(); const released = markWithdrawalKycReady(db, target.id, p.note); const blockedAfterKyc = withdrawalRejectionAfterKyc(db, target.id); if (blockedAfterKyc) { released.forEach(item => { try { rejectWithdrawal(db, item, blockedAfterKyc.message); } catch (e) { console.error('[kyc:extra-card-reject-failed]', item.reference, e.message); } }); } adminAudit(db, { admin, action: 'kyc.verify', targetType: 'user', targetId: userId, before, after: { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt, releasedWithdrawals: released.map(item => item.reference) }, reason: p.note }); save(db); console.log('[kyc:verified]', userId, released.length); return json(res, 200, { ok: true, user: adminSafeUser(target, db), releasedWithdrawals: released.map(publicWithdrawal) }); }
     if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/kyc\/reject$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const userId = decodeURIComponent(pathname.split('/')[4]); const target = db.users.find(item => item.id === userId); if (!target) return fail(res, 404, 'User was not found.'); const p = await body(req); const before = { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt }; target.kycStatus = KYC_STATUS.REJECTED; target.kycVerifiedAt = null; adminAudit(db, { admin, action: 'kyc.reject', targetType: 'user', targetId: userId, before, after: { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt }, reason: p.note }); save(db); console.log('[kyc:rejected]', userId); return json(res, 200, { ok: true, user: adminSafeUser(target, db) }); }
     if (req.method === 'POST' && (pathname === '/api/admin/settings' || pathname === '/api/admin/settings/withdrawal-cards')) {
       const admin = requireAdmin(req, res, db); if (!admin) return;
@@ -2071,7 +2096,8 @@ async function route(req, res) {
       // Already-verified users have no fee to pay, so they are rejected here. Anyone who still
       // owes the KYC fee (checkout or redeemed balance) pays it first and is rejected only
       // after that payment is confirmed (see createWithdrawalFromKycPayment).
-      if (!kycRequired && needsExtraCardAfterKyc(db, user.id)) return json(res, 400, { error: ONE_MORE_CARD_MESSAGE, code: ONE_MORE_CARD_CODE });
+      const blockedNow = kycRequired ? null : withdrawalRejectionAfterKyc(db, user.id);
+      if (blockedNow) return json(res, 400, { error: blockedNow.message, code: blockedNow.code, ...(blockedNow.progress ? { progress: blockedNow.progress } : {}) });
       if (kycRequired && p.kycPayWith === 'redeemed_balance') {
         // Users an admin has approved for balance payments can settle the one-time KYC fee
         // from their redeemed balance instead of the secure checkout. Everything below is
@@ -2082,14 +2108,15 @@ async function route(req, res) {
         const intent = { methodId: method.id, requestedAmount, operationalCharge, actualAmount };
         const payment = { id: uid('kycbyp'), userId: user.id, withdrawalId: null, withdrawalReference: null, withdrawalIntent: intent, amount: KYC_BYPASS_FEE, currency: PAYSTACK_CURRENCY, reference: uniqueReference(db, 'KYC'), status: 'initialized', paidWith: 'redeemed_balance', callbackUrl: '', expiresAt: new Date(Date.now() + PAYMENT_SESSION_MS).toISOString(), createdAt: now(), updatedAt: now() };
         db.kycBypassPayments.push(payment);
-        if (needsExtraCardAfterKyc(db, user.id)) {
+        const blockedAfterFee = withdrawalRejectionAfterKyc(db, user.id);
+        if (blockedAfterFee) {
           // Fee is settled first: user is verified, fee is refunded in full, balance untouched,
           // and only then does the "purchase one more card" rejection go back to the client.
           completeKycBypassPayment(db, payment, 'redeemed_balance');
-          payment.status = 'success'; payment.rejectionCode = ONE_MORE_CARD_CODE; payment.rejectionReason = ONE_MORE_CARD_MESSAGE;
+          payment.status = 'success'; applyRejection(payment, blockedAfterFee);
           save(db);
           console.log('[withdrawal:kyc-paid-from-balance-rejected]', payment.reference);
-          return json(res, 200, { paidWithBalance: true, withdrawal: null, rejection: { code: ONE_MORE_CARD_CODE, message: ONE_MORE_CARD_MESSAGE }, state: publicState(db, user) });
+          return json(res, 200, { paidWithBalance: true, withdrawal: null, rejection: rejectionPayload(blockedAfterFee), state: publicState(db, user) });
         }
         balance(user, 'redeemed', -KYC_BYPASS_FEE);
         const result = completeKycBypassPayment(db, payment, 'redeemed_balance');
@@ -2179,7 +2206,7 @@ async function route(req, res) {
           withdrawal: withdrawal ? publicWithdrawal(withdrawal) : null,
           receipt: db.receipts.find(r => r.reference === ref),
           refundReceipt: withdrawal?.kycBypassRefundReference ? db.receipts.find(r => r.reference === withdrawal.kycBypassRefundReference) : null,
-          rejection: payment.rejectionCode ? { code: payment.rejectionCode, message: payment.rejectionReason } : null,
+          rejection: payment.rejectionCode ? rejectionPayload({ code: payment.rejectionCode, message: payment.rejectionReason, progress: payment.rejectionProgress }) : null,
         });
       }
       return fail(res, 409, 'Payment is still being confirmed. Please return to the payment screen shortly.');

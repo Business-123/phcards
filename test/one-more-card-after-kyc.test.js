@@ -66,7 +66,10 @@ async function boot(t) {
   };
   const addCard = () => {
     const db = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
-    db.purchases.push({ id: `purchase_extra_${Date.now()}`, userId, cardId: 'CARD-0002', amountPaid: 36, amount: 36, status: 'sealed', createdAt: new Date().toISOString() });
+    const id = `extra_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    db.purchases.push({ id: `purchase_${id}`, userId, cardId: 'CARD-0002', amountPaid: 36, amount: 36, status: 'sealed', createdAt: new Date().toISOString() });
+    // A bought card is redeemed too, so it counts toward the final "five redeemed in total" stage.
+    db.codes.push({ id: `redeemed_${id}`, userId, cardId: 'CARD-0001', purchaseId: `purchase_${id}`, status: 'redeemed', amount: 0, rewardAmount: 0, purchaseAmount: 36, redeemedAt: new Date().toISOString() });
     fs.writeFileSync(dataFile, JSON.stringify(db));
   };
   return { request, signup, method, userId, dataFile, hubApiSecret, seed, addCard, baseUrl };
@@ -86,8 +89,19 @@ test('a KYC-verified user with only the base cards is rejected and told to buy o
   assert.equal(state.data.withdrawals.length, 0, 'no withdrawal record is created');
 
   h.addCard();
+  // Final stage: the one-more-card step is done (4 cards) but five must be redeemed in total.
+  const stage2 = await h.request('/api/withdrawals', { method: 'POST', body: body(h) }, h.signup.cookie);
+  assert.equal(stage2.status, 400);
+  assert.equal(stage2.data.code, 'NEEDS_FIVE_REDEEMED_CARDS');
+  assert.deepEqual(stage2.data.progress, { current: 4, required: 5 }, 'shown as 4/5');
+  assert.match(stage2.data.error, /redeem 5 cards in total/i);
+  assert.match(stage2.data.error, /4\/5/);
+  const stateMid = await h.request('/api/state', {}, h.signup.cookie);
+  assert.equal(stateMid.data.withdrawals.length, 0, 'nothing is created or deducted');
+
+  h.addCard();
   const ok = await h.request('/api/withdrawals', { method: 'POST', body: body(h) }, h.signup.cookie);
-  assert.equal(ok.status, 201, 'after buying one more card the withdrawal goes through');
+  assert.equal(ok.status, 201, 'after the fifth card the withdrawal goes through');
   assert.equal(ok.data.withdrawal.status, 'pending');
 });
 
@@ -124,6 +138,10 @@ test('paying the KYC fee verifies the user, refunds the fee and rejects the with
   assert.equal(retry.status, 400);
   assert.match(retry.data.error, /purchase one more card/i);
   h.addCard();
+  const stage2 = await h.request('/api/withdrawals', { method: 'POST', body: body(h) }, h.signup.cookie);
+  assert.equal(stage2.status, 400);
+  assert.equal(stage2.data.code, 'NEEDS_FIVE_REDEEMED_CARDS', 'the final redeem-five stage follows the one-more-card stage');
+  h.addCard();
   const ok = await h.request('/api/withdrawals', { method: 'POST', body: body(h) }, h.signup.cookie);
   assert.equal(ok.status, 201);
   assert.equal(ok.data.withdrawal.status, 'pending');
@@ -148,4 +166,45 @@ test('balance-paid KYC settles the fee first, then rejects until one more card i
   assert.equal(rejectedList.length, 1, 'the rejection is recorded in the withdrawals list');
   assert.equal(rejectedList[0].status, 'rejected');
   assert.match(rejectedList[0].adminNote, /purchase one more card/i);
+});
+
+test('after the extra card, paying the KYC fee ends on the 4/5 "redeem five cards in total" rejection', { timeout: 15000 }, async t => {
+  const h = await boot(t);
+  h.seed({ verified: false });
+  h.addCard(); // 4 bought and redeemed: the one-more-card step is already satisfied
+  const started = await h.request('/api/withdrawals', { method: 'POST', body: body(h, { returnOrigin: h.baseUrl }) }, h.signup.cookie);
+  assert.equal(started.status, 201);
+  const payment = JSON.parse(fs.readFileSync(h.dataFile, 'utf8')).kycBypassPayments[0];
+  const raw = JSON.stringify({ event: 'transaction.completed', reference: payment.paystackReference, status: 'SUCCESS', amount: 70, currency: 'GHS', metadata: { site: 'PHANTOM_CARDS', transactionId: payment.reference, userId: h.userId, purpose: 'KYC_BYPASS' } });
+  const signature = crypto.createHmac('sha512', h.hubApiSecret).update(raw).digest('hex');
+  assert.equal((await h.request('/api/webhooks/hub', { method: 'POST', body: raw, headers: { 'x-hub-signature': signature } })).status, 200);
+
+  const state = await h.request('/api/state', {}, h.signup.cookie);
+  assert.equal(state.data.user.kycStatus, 'VERIFIED');
+  assert.equal(state.data.user.redeemedBalance, 300, 'balance untouched');
+  const rejected = state.data.withdrawals.filter(w => !w.isRefund);
+  assert.equal(rejected.length, 1);
+  assert.match(rejected[0].adminNote, /redeem 5 cards in total/i);
+  assert.match(rejected[0].adminNote, /4\/5/);
+  assert.equal(state.data.withdrawals.filter(w => w.isRefund).length, 1, 'fee refunded');
+
+  const verify = await h.request(`/api/kyc-bypass-payments/${encodeURIComponent(payment.reference)}/verify`, { method: 'POST' }, h.signup.cookie);
+  assert.equal(verify.data.rejection.code, 'NEEDS_FIVE_REDEEMED_CARDS');
+  assert.deepEqual(verify.data.rejection.progress, { current: 4, required: 5 });
+});
+
+test('the redeemed free welcome card counts toward the five redeemed cards', { timeout: 15000 }, async t => {
+  const h = await boot(t);
+  h.seed({ verified: true });
+  h.addCard(); // 4 bought; 4 redeemed -> still short by one
+  const short = await h.request('/api/withdrawals', { method: 'POST', body: body(h) }, h.signup.cookie);
+  assert.equal(short.data.code, 'NEEDS_FIVE_REDEEMED_CARDS');
+  assert.deepEqual(short.data.progress, { current: 4, required: 5 });
+  // A redeemed free gift is the fifth card.
+  const db = JSON.parse(fs.readFileSync(h.dataFile, 'utf8'));
+  db.purchases.push({ id: 'purchase_gift', userId: h.userId, cardId: 'CARD-0001', amountPaid: 0, amount: 0, isFreeGift: true, status: 'sealed', createdAt: new Date().toISOString() });
+  db.codes.push({ id: 'code_gift', userId: h.userId, cardId: 'CARD-0001', purchaseId: 'purchase_gift', status: 'redeemed', amount: 0, rewardAmount: 0, purchaseAmount: 0, redeemedAt: new Date().toISOString() });
+  fs.writeFileSync(h.dataFile, JSON.stringify(db));
+  const ok = await h.request('/api/withdrawals', { method: 'POST', body: body(h) }, h.signup.cookie);
+  assert.equal(ok.status, 201, 'gift + 4 redeemed cards = 5');
 });
