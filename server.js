@@ -67,6 +67,12 @@ function withdrawalCardRequirement(db) {
 }
 let OPERATIONAL_CHARGE_RATE = 0.10;
 let KYC_BYPASS_FEE = 70;
+// Pending payout period + paid "instant payout" (both admin-editable, db.settings).
+let PAYOUT_WAIT_ENABLED = true;   // when off, nothing is held back: admins can approve pending withdrawals straight away
+let PAYOUT_WAIT_DAYS = 7;         // days a new withdrawal stays pending before it can be approved
+let INSTANT_PAYOUT_ENABLED = true; // when off, users cannot pay to skip the pending period
+let INSTANT_PAYOUT_FEE = 100;     // GHS a user pays to skip the pending period on one withdrawal
+const DAY_MS = 24 * 60 * 60 * 1000;
 let DISABLED_TIERS = []; // tier keys an admin has switched off for every user (db.settings.disabledTiers)
 let DISABLED_POPUPS = []; // withdrawal pop-ups (requirements) an admin has switched off (db.settings.disabledPopups)
 
@@ -80,11 +86,13 @@ const SETTING_LIMITS = {
   tierPurchaseLimit: { min: 1, max: 100 },
   operationalChargeRate: { min: 0, max: 0.5 },
   kycBypassFee: { min: 1, max: 100000 },
+  payoutWaitDays: { min: 1, max: 90 },
+  instantPayoutFee: { min: 1, max: 100000 },
   rewardMultiplierMin: { min: 0.1, max: 50 },
   rewardMultiplierMax: { min: 0.1, max: 50 },
 };
 function settingsDefaults() {
-  return { minWithdrawal: 100, minPurchasedCardsForWithdrawal: MIN_PURCHASED_CARDS_FOR_WITHDRAWAL, dailyPurchaseLimit: 3, tierPurchaseLimit: 2, operationalChargeRate: 0.10, kycBypassFee: 70, rewardMultiplierMin: 3.52, rewardMultiplierMax: 4.42, disabledTiers: [], disabledPopups: [] };
+  return { minWithdrawal: 100, minPurchasedCardsForWithdrawal: MIN_PURCHASED_CARDS_FOR_WITHDRAWAL, dailyPurchaseLimit: 3, tierPurchaseLimit: 2, operationalChargeRate: 0.10, kycBypassFee: 70, payoutWaitEnabled: true, payoutWaitDays: 7, instantPayoutEnabled: true, instantPayoutFee: 100, rewardMultiplierMin: 3.52, rewardMultiplierMax: 4.42, disabledTiers: [], disabledPopups: [] };
 }
 // Tiers an admin has switched off. Unknown keys are dropped; order follows PRICE_TIERS.
 function cleanDisabledTiers(value) {
@@ -112,6 +120,10 @@ function cleanSettings(raw) {
     tierPurchaseLimit: pick('tierPurchaseLimit', src.tierPurchaseLimit, true),
     operationalChargeRate: pick('operationalChargeRate', src.operationalChargeRate),
     kycBypassFee: pick('kycBypassFee', src.kycBypassFee),
+    payoutWaitEnabled: src.payoutWaitEnabled === undefined ? d.payoutWaitEnabled : src.payoutWaitEnabled !== false && src.payoutWaitEnabled !== 'false',
+    payoutWaitDays: pick('payoutWaitDays', src.payoutWaitDays, true),
+    instantPayoutEnabled: src.instantPayoutEnabled === undefined ? d.instantPayoutEnabled : src.instantPayoutEnabled !== false && src.instantPayoutEnabled !== 'false',
+    instantPayoutFee: pick('instantPayoutFee', src.instantPayoutFee),
     rewardMultiplierMin: pick('rewardMultiplierMin', src.rewardMultiplierMin),
     rewardMultiplierMax: pick('rewardMultiplierMax', src.rewardMultiplierMax),
     disabledTiers: cleanDisabledTiers(src.disabledTiers),
@@ -127,6 +139,10 @@ function applySettings(settings) {
   TIER_PURCHASE_LIMIT = s.tierPurchaseLimit;
   OPERATIONAL_CHARGE_RATE = s.operationalChargeRate;
   KYC_BYPASS_FEE = s.kycBypassFee;
+  PAYOUT_WAIT_ENABLED = s.payoutWaitEnabled;
+  PAYOUT_WAIT_DAYS = s.payoutWaitDays;
+  INSTANT_PAYOUT_ENABLED = s.instantPayoutEnabled;
+  INSTANT_PAYOUT_FEE = s.instantPayoutFee;
   DISABLED_TIERS = s.disabledTiers;
   DISABLED_POPUPS = s.disabledPopups;
   REWARD_MULTIPLIER_MIN = s.rewardMultiplierMin;
@@ -194,6 +210,7 @@ function uniqueReference(db, kind) {
     ...db.purchases,
     ...db.withdrawals,
     ...(db.kycBypassPayments || []),
+    ...(db.instantPayoutPayments || []),
     ...db.transactions,
     ...db.receipts,
     ...(db.codes || []).map(x => ({ reference: x.redemptionReference })),
@@ -379,7 +396,7 @@ function makeCards() {
     return i === 0 ? { ...card, ...gift, price: 0, priceGhs: 0, displayPriceUsd: 0, stock: 999999, active: true } : card;
   });
 }
-function blankDb() { return { version: 5, cards: makeCards(), users: [], sessions: [], adminSessions: [], adminAuditLogs: [], deposits: [], cardPayments: [], purchases: [], dailyPurchaseCounts: [], codes: [], methods: [], withdrawals: [], transactions: [], receipts: [], passwordResets: [], kycBypassPayments: [], settings: settingsDefaults() }; }
+function blankDb() { return { version: 5, cards: makeCards(), users: [], sessions: [], adminSessions: [], adminAuditLogs: [], deposits: [], cardPayments: [], purchases: [], dailyPurchaseCounts: [], codes: [], methods: [], withdrawals: [], transactions: [], receipts: [], passwordResets: [], kycBypassPayments: [], instantPayoutPayments: [], settings: settingsDefaults() }; }
 function syncCardCatalog(cards) {
   const generated = makeCards();
   const generatedMap = new Map(generated.map(card => [card.id, card]));
@@ -580,7 +597,30 @@ function normalizeWithdrawalRecord(withdrawal) {
   withdrawal.kycBypassRefundReference = withdrawal.kycBypassRefundReference || null;
   withdrawal.kycBypassRefundedAt = withdrawal.kycBypassRefundedAt || null;
   withdrawal.paymentStatus = withdrawal.paymentStatus || 'not_required';
+  // Pending payout period. null = no waiting period (older withdrawals are never retro-fitted with one).
+  withdrawal.payoutReleaseAt = withdrawal.payoutReleaseAt || null;
+  withdrawal.instantPayout = Boolean(withdrawal.instantPayout);
+  withdrawal.instantPayoutFee = money(withdrawal.instantPayoutFee || 0);
+  withdrawal.instantPayoutReference = withdrawal.instantPayoutReference || null;
+  withdrawal.instantPayoutPaidAt = withdrawal.instantPayoutPaidAt || null;
   return withdrawal;
+}
+// When a withdrawal created right now may first be approved (ISO string), or null if no waiting period applies.
+function payoutReleaseAtFromNow() {
+  return PAYOUT_WAIT_ENABLED && PAYOUT_WAIT_DAYS > 0 ? new Date(Date.now() + PAYOUT_WAIT_DAYS * DAY_MS).toISOString() : null;
+}
+// Milliseconds until this withdrawal can be approved. 0 when it is due, was paid for as an instant payout,
+// or the admin has switched the waiting period off (that releases everything already waiting).
+function payoutHoldRemainingMs(withdrawal) {
+  if (!PAYOUT_WAIT_ENABLED || withdrawal.instantPayout || !withdrawal.payoutReleaseAt) return 0;
+  const left = Date.parse(withdrawal.payoutReleaseAt) - Date.now();
+  return Number.isFinite(left) && left > 0 ? left : 0;
+}
+function payoutHoldMessage(withdrawal) {
+  const left = payoutHoldRemainingMs(withdrawal);
+  const days = Math.floor(left / DAY_MS), hours = Math.ceil((left % DAY_MS) / 3600000);
+  const when = days >= 1 ? `${days} day${days === 1 ? '' : 's'}${hours && hours < 24 ? ` ${hours}h` : ''}` : `${Math.max(1, Math.ceil(left / 60000))} minute(s)`;
+  return `This withdrawal is in its pending payout period and can be approved in ${when} (from ${withdrawal.payoutReleaseAt}). The user can skip the wait with an instant payout, or you can switch the waiting period off in Settings.`;
 }
 function withdrawalIsHeld(status) {
   return [WITHDRAWAL_STATUS.PENDING, WITHDRAWAL_STATUS.APPROVED, WITHDRAWAL_STATUS.PROCESSING, WITHDRAWAL_STATUS.PENDING_KYC_VERIFICATION].includes(status);
@@ -603,7 +643,7 @@ function purgePendingKycWithdrawals(clean) {
 }
 function normalizeDb(db) {
   const clean = { ...blankDb(), ...(db || {}) };
-  for (const key of ['users', 'sessions', 'adminSessions', 'adminAuditLogs', 'deposits', 'cardPayments', 'purchases', 'dailyPurchaseCounts', 'codes', 'methods', 'withdrawals', 'transactions', 'receipts', 'passwordResets', 'kycBypassPayments']) {
+  for (const key of ['users', 'sessions', 'adminSessions', 'adminAuditLogs', 'deposits', 'cardPayments', 'purchases', 'dailyPurchaseCounts', 'codes', 'methods', 'withdrawals', 'transactions', 'receipts', 'passwordResets', 'kycBypassPayments', 'instantPayoutPayments']) {
     if (!Array.isArray(clean[key])) clean[key] = [];
   }
   clean.settings = cleanSettings(clean.settings);
@@ -823,6 +863,10 @@ function publicState(db, user) {
     // Flat daily total across all tiers, not per price tier.
     withdrawalCardRequirement: withdrawalCardRequirement(db),
     kycBypassFee: KYC_BYPASS_FEE,
+    payoutWaitEnabled: PAYOUT_WAIT_ENABLED,
+    payoutWaitDays: PAYOUT_WAIT_DAYS,
+    instantPayoutEnabled: INSTANT_PAYOUT_ENABLED,
+    instantPayoutFee: INSTANT_PAYOUT_FEE,
     operationalChargeRate: OPERATIONAL_CHARGE_RATE,
     rewardMultiplierMin: REWARD_MULTIPLIER_MIN,
     rewardMultiplierMax: REWARD_MULTIPLIER_MAX,
@@ -1065,6 +1109,7 @@ function approveWithdrawal(db, withdrawal, adminNote = '') {
     };
   }
   if (withdrawal.status !== WITHDRAWAL_STATUS.PENDING) throw new Error(`Only pending withdrawals can be approved. Current status is ${withdrawal.status}.`);
+  if (payoutHoldRemainingMs(withdrawal) > 0) throw new Error(payoutHoldMessage(withdrawal));
   const approvedAt = now();
   withdrawal.status = WITHDRAWAL_STATUS.APPROVED;
   withdrawal.approvedAt = approvedAt;
@@ -1094,6 +1139,8 @@ function rejectWithdrawal(db, withdrawal, adminNote = '') {
   if (![WITHDRAWAL_STATUS.PENDING, WITHDRAWAL_STATUS.PENDING_KYC_VERIFICATION, WITHDRAWAL_STATUS.APPROVED].includes(withdrawal.status)) throw new Error(`Only pending withdrawals can be rejected. Current status is ${withdrawal.status}.`);
   const activeBypassPayment = db.kycBypassPayments.find(payment => payment.withdrawalId === withdrawal.id && ['initialized', 'PAYMENT_INITIALIZED'].includes(payment.status));
   if (activeBypassPayment) throw new Error('This withdrawal has a GHS 70.00 checkout awaiting confirmation and cannot be rejected yet.');
+  const activeInstantPayment = (db.instantPayoutPayments || []).find(payment => payment.withdrawalId === withdrawal.id && ['initialized', 'PAYMENT_INITIALIZED'].includes(payment.status) && Date.parse(payment.expiresAt) > Date.now());
+  if (activeInstantPayment) throw new Error('This withdrawal has an instant payout checkout awaiting confirmation and cannot be rejected yet.');
   const user = db.users.find(item => item.id === withdrawal.userId);
   if (!user) throw new Error('Withdrawal user was not found.');
   const rejectedAt = now();
@@ -1149,7 +1196,7 @@ function createWithdrawalFromKycPayment(db, payment) {
   if (!method || Number(user.redeemedBalance) < Number(intent.requestedAmount)) return null;
   const ref = uniqueReference(db, 'WDL');
   balance(user, 'redeemed', -intent.requestedAmount);
-  const withdrawal = normalizeWithdrawalRecord({ id: uid('wdl'), userId: user.id, methodId: method.id, amount: intent.requestedAmount, requestedAmount: intent.requestedAmount, operationalCharge: intent.operationalCharge, actualAmount: intent.actualAmount, reference: ref, status: WITHDRAWAL_STATUS.PENDING, kycRequired: true, kycBypassUsed: false, kycBypassFee: 0, paymentStatus: 'success', createdAt: now(), approvedAt: null, completedAt: null });
+  const withdrawal = normalizeWithdrawalRecord({ id: uid('wdl'), userId: user.id, methodId: method.id, amount: intent.requestedAmount, requestedAmount: intent.requestedAmount, operationalCharge: intent.operationalCharge, actualAmount: intent.actualAmount, reference: ref, status: WITHDRAWAL_STATUS.PENDING, kycRequired: true, kycBypassUsed: false, kycBypassFee: 0, paymentStatus: 'success', payoutReleaseAt: payoutReleaseAtFromNow(), createdAt: now(), approvedAt: null, completedAt: null });
   db.withdrawals.push(withdrawal);
   const related = { withdrawalId: withdrawal.id, methodId: method.id, payoutStatus: WITHDRAWAL_STATUS.PENDING, requestedAmount: intent.requestedAmount, operationalCharge: intent.operationalCharge, actualAmount: intent.actualAmount, kycRequired: true, kycBypassUsed: false };
   transaction(db, { userId: user.id, type: 'debit', amount: intent.requestedAmount, account: 'redeemed', reference: ref, status: WITHDRAWAL_STATUS.PENDING, reason: `Withdrawal to ${method.network}`, related });
@@ -1266,6 +1313,70 @@ function markWithdrawalBypassPaid(db, withdrawal, paymentReference) {
     rcpt.status = WITHDRAWAL_STATUS.PENDING;
     rcpt.related = { ...(rcpt.related || {}), payoutStatus: WITHDRAWAL_STATUS.PENDING, kycBypassUsed: true, kycBypassPaymentReference: paymentReference, actualAmount: withdrawal.actualAmount, operationalCharge: withdrawal.operationalCharge };
   }
+}
+// ---- Instant payout --------------------------------------------------------
+// A user can pay INSTANT_PAYOUT_FEE (hub checkout) to skip the pending payout period on ONE withdrawal.
+// Like the KYC fee, paying never approves anything by itself: the withdrawal stays PENDING, is flagged
+// as an instant payout and its hold is lifted, so an admin can approve it straight away.
+function completeInstantPayoutPayment(db, payment, provider) {
+  const withdrawal = db.withdrawals.find(item => item.id === payment.withdrawalId && item.userId === payment.userId);
+  if (payment.status === 'success') return { withdrawal, receipt: db.receipts.find(r => r.reference === payment.reference) };
+  const fee = money(payment.amount);
+  payment.status = 'success'; payment.verifiedAt = now(); payment.updatedAt = now(); payment.provider = provider;
+  if (withdrawal) normalizeWithdrawalRecord(withdrawal);
+  const eligible = Boolean(withdrawal) && withdrawal.status === WITHDRAWAL_STATUS.PENDING && !withdrawal.instantPayout;
+  // Paid, but the withdrawal was already approved/rejected meanwhile: nothing to speed up, so the fee needs a manual refund.
+  payment.applied = eligible;
+  if (!eligible) payment.needsRefund = true;
+  const related = { withdrawalId: payment.withdrawalId, withdrawalReference: payment.withdrawalReference, provider, applied: eligible };
+  transaction(db, { userId: payment.userId, type: 'debit', amount: fee, account: 'external', reference: payment.reference, reason: 'Instant payout fee', related });
+  const rcpt = receipt(db, { userId: payment.userId, type: 'instant_payout', amount: fee, account: 'external', reference: payment.reference, related });
+  if (eligible) {
+    const paidAt = now();
+    withdrawal.instantPayout = true;
+    withdrawal.instantPayoutFee = fee;
+    withdrawal.instantPayoutReference = payment.reference;
+    withdrawal.instantPayoutPaidAt = paidAt;
+    withdrawal.payoutReleaseAt = paidAt;
+    const flags = { instantPayout: true, instantPayoutFee: fee, instantPayoutReference: payment.reference, payoutReleaseAt: paidAt };
+    const tx = db.transactions.find(item => item.reference === withdrawal.reference);
+    if (tx) tx.related = { ...(tx.related || {}), ...flags };
+    const wrcpt = db.receipts.find(item => item.reference === withdrawal.reference);
+    if (wrcpt) wrcpt.related = { ...(wrcpt.related || {}), ...flags };
+  }
+  return { withdrawal, receipt: rcpt };
+}
+async function reconcileInstantPayoutPayment(reference) {
+  const before = load();
+  const known = (before.instantPayoutPayments || []).find(item => item.paystackReference === reference);
+  if (!known) return [404, { error: 'Instant payout payment was not found.' }];
+  let verified = null;
+  if (['initialized', 'PAYMENT_INITIALIZED'].includes(known.status) && Date.parse(known.expiresAt) > Date.now()) {
+    verified = await hubCall('GET', `/transaction/verify/${encodeURIComponent(reference)}`);
+  }
+  return withPurchaseMutation(async () => {
+    const db = load();
+    const payment = db.instantPayoutPayments.find(item => item.paystackReference === reference);
+    if (!payment) return [404, { error: 'Instant payout payment was not found.' }];
+    if (Date.parse(payment.expiresAt) <= Date.now() && ['initialized', 'PAYMENT_INITIALIZED'].includes(payment.status)) {
+      payment.status = 'expired'; payment.updatedAt = now();
+    }
+    if (verified && ['initialized', 'PAYMENT_INITIALIZED'].includes(payment.status)) {
+      if (Math.round(Number(verified.amount) * 100) !== Math.round(Number(payment.amount) * 100) || verified.currency !== PAYSTACK_CURRENCY) {
+        save(db);
+        return [409, { error: 'Payment details did not reconcile.' }];
+      }
+      if (verified.status === 'SUCCESS') completeInstantPayoutPayment(db, payment, 'hub');
+      else if (['FAILED', 'ABANDONED'].includes(verified.status)) { payment.status = 'failed'; payment.updatedAt = now(); }
+    }
+    save(db);
+    if (payment.status === 'success') return [200, { redirect: payment.callbackUrl }];
+    if (['failed', 'expired'].includes(payment.status)) {
+      const origin = payment.callbackUrl ? new URL(payment.callbackUrl).origin : (APP_BASE_URL || '');
+      return [200, { redirect: `${origin}/?payment=${payment.status}` }];
+    }
+    return [202, { message: 'Payment is still being confirmed. Please wait a moment.' }];
+  });
 }
 function adminAuthorized(req) {
   if (!ADMIN_APPROVAL_TOKEN) return false;
@@ -1393,6 +1504,7 @@ function adminTrend(db, days = 14) {
   result.forEach(row => { runningUsers += newUsersByDay.get(row.date) || 0; row.users = runningUsers; });
   // Spent: money users paid that day, combining card purchases and KYC verification (bypass) fees.
   db.purchases.forEach(item => { const row = byDate.get(adminDayKey(item.createdAt)); if (row) row.spent += Number(item.amountPaid ?? item.amount ?? 0); });
+  (db.instantPayoutPayments || []).filter(item => item.status === 'success').forEach(item => { const row = byDate.get(adminDayKey(item.verifiedAt || item.updatedAt || item.createdAt)); if (row) row.spent += Number(item.amount || 0); });
   (db.kycBypassPayments || []).filter(item => String(item.status).toLowerCase() === 'success').forEach(item => { const row = byDate.get(adminDayKey(item.verifiedAt || item.updatedAt || item.createdAt)); if (row) row.spent += Number(item.amount || 0); });
   return result;
 }
@@ -1435,6 +1547,7 @@ function adminWithdrawalRow(db, withdrawal) {
     userKycStatus: user?.kycStatus || KYC_STATUS.NOT_VERIFIED,
     method: method ? { id: method.id, network: method.network, accountName: method.accountName, phone: method.phone } : null,
     transactionStatus: transactionItem?.status || null,
+    payoutHoldMs: withdrawal.status === WITHDRAWAL_STATUS.PENDING ? payoutHoldRemainingMs(withdrawal) : 0,
   };
 }
 function adminTransactionRow(db, transactionItem) {
@@ -1447,6 +1560,10 @@ function kycBypassCallback(req, referenceValue, browserOrigin = '') {
   const browser = normalizeOrigin(browserOrigin);
   const origin = browser || requestOrigin(req);
   return `${origin}/?kyc_bypass_reference=${encodeURIComponent(referenceValue)}`;
+}
+function instantPayoutCallback(req, referenceValue, browserOrigin = '') {
+  const origin = normalizeOrigin(browserOrigin) || requestOrigin(req);
+  return `${origin}/?instant_payout_reference=${encodeURIComponent(referenceValue)}`;
 }
 // Same idea for a wallet top-up: where to send the browser once we've reconciled the
 // payment ourselves. Computed and stored at initiate time (not at /complete time),
@@ -1669,7 +1786,7 @@ async function route(req, res) {
     if (!originAllowed(req)) return fail(res, 403, 'Request origin is not allowed.');
     if (rateLimit(req, res, pathname)) return;
     if (req.method === 'GET' && pathname === '/api/health') return json(res, 200, { ok: true, hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET), appBaseUrl: APP_BASE_URL || requestOrigin(req), appBaseUrlConfigured: Boolean(APP_BASE_URL), dataFileConfigured: Boolean(process.env.PHANTOM_DATA_FILE), dataFile: DATA_FILE });
-    if (req.method === 'GET' && pathname === '/api/config') return json(res, 200, { minWithdrawal: MIN_WITHDRAWAL, minPurchasedCardsForWithdrawal: withdrawalCardRequirement(db), operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, appBaseUrl: APP_BASE_URL || requestOrigin(req) });
+    if (req.method === 'GET' && pathname === '/api/config') return json(res, 200, { minWithdrawal: MIN_WITHDRAWAL, minPurchasedCardsForWithdrawal: withdrawalCardRequirement(db), operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, payoutWaitEnabled: PAYOUT_WAIT_ENABLED, payoutWaitDays: PAYOUT_WAIT_DAYS, instantPayoutEnabled: INSTANT_PAYOUT_ENABLED, instantPayoutFee: INSTANT_PAYOUT_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, appBaseUrl: APP_BASE_URL || requestOrigin(req) });
     // The browser lands here after Paystack checkout, via the hub's own redirectUrl.
     // We never trust the hub's ?status= query param blindly — we re-verify the payment
     // with the hub server-side right here, then send a single HTTP redirect straight
@@ -1683,16 +1800,17 @@ async function route(req, res) {
       }
       const cardPayment = db.cardPayments.find(x => x.paystackReference === reference);
       const kycPayment = !cardPayment && db.kycBypassPayments.find(x => x.paystackReference === reference);
+      const instantPayment = !cardPayment && !kycPayment && db.instantPayoutPayments.find(x => x.paystackReference === reference);
       // Fallback if the hub hasn't confirmed yet (rare — reconcile below normally
       // resolves synchronously): send the browser to the same URL the app already
       // knows how to poll and show a "still confirming" state for, instead of a
       // generic message that would wrongly imply the payment failed.
-      let destination = cardPayment ? cardPayment.callbackUrl : (kycPayment ? kycPayment.callbackUrl : `${origin}/?payment=error`);
+      let destination = cardPayment ? cardPayment.callbackUrl : (kycPayment ? kycPayment.callbackUrl : (instantPayment ? instantPayment.callbackUrl : `${origin}/?payment=error`));
       try {
-        if (cardPayment || kycPayment) {
+        if (cardPayment || kycPayment || instantPayment) {
           const [, result] = cardPayment
             ? await reconcileCardPayment(reference)
-            : await reconcileKycBypassPayment(reference);
+            : kycPayment ? await reconcileKycBypassPayment(reference) : await reconcileInstantPayoutPayment(reference);
           if (result && result.redirect) destination = result.redirect;
         }
       } catch (error) {
@@ -1709,9 +1827,11 @@ async function route(req, res) {
       const reference = decodeURIComponent(pathname.split('/')[3]);
       const cardPayment = db.cardPayments.find(x => x.paystackReference === reference);
       const payment = !cardPayment && db.kycBypassPayments.find(x => x.paystackReference === reference);
-      if (!cardPayment && !payment) return fail(res, 404, 'Payment session was not found.');
+      const instantPayment = !cardPayment && !payment && db.instantPayoutPayments.find(x => x.paystackReference === reference);
+      if (!cardPayment && !payment && !instantPayment) return fail(res, 404, 'Payment session was not found.');
       try {
         if (cardPayment) return json(res, ...(await reconcileCardPayment(reference)));
+        if (instantPayment) return json(res, ...(await reconcileInstantPayoutPayment(reference)));
         return json(res, ...(await reconcileKycBypassPayment(reference)));
       } catch (error) { return fail(res, 502, error.message || 'Payment verification failed.'); }
     }
@@ -1733,6 +1853,20 @@ async function route(req, res) {
           if (!matches) { console.error('[hub:webhook] card payment event did not reconcile', reference); return json(res, 200, { ok: true, mismatched: true }); }
           if (status === 'SUCCESS') completeCardPayment(fresh, cardPayment, 'hub');
           else if (CARD_PAYMENT_ACTIVE.includes(cardPayment.status)) { cardPayment.status = 'FAILED'; cardPayment.updatedAt = now(); releaseCardReservation(fresh, cardPayment); }
+          save(fresh);
+          return json(res, 200, { ok: true });
+        });
+      }
+      if (db.instantPayoutPayments.some(x => x.paystackReference === reference)) {
+        return withPurchaseMutation(async () => {
+          const fresh = load();
+          const payment = fresh.instantPayoutPayments.find(x => x.paystackReference === reference);
+          if (!payment) return json(res, 200, { ok: true, unmatched: true });
+          const matches = Math.round(Number(event.amount) * 100) === Math.round(Number(payment.amount) * 100) && String(event.currency) === PAYSTACK_CURRENCY
+            && event.metadata?.purpose === 'INSTANT_PAYOUT' && event.metadata?.transactionId === payment.reference;
+          if (!matches) { console.error('[hub:webhook] instant payout event did not reconcile', reference); return json(res, 200, { ok: true, mismatched: true }); }
+          if (status === 'SUCCESS') completeInstantPayoutPayment(fresh, payment, 'hub');
+          else if (payment.status !== 'success') { payment.status = 'failed'; payment.updatedAt = now(); }
           save(fresh);
           return json(res, 200, { ok: true });
         });
@@ -1786,9 +1920,9 @@ async function route(req, res) {
       const pendingWithdrawals = db.withdrawals.filter(item => !item.isRefund && [WITHDRAWAL_STATUS.PENDING, WITHDRAWAL_STATUS.PENDING_KYC_VERIFICATION].includes(item.status));
       const pendingKyc = db.users.filter(item => item.kycStatus === KYC_STATUS.PENDING);
       const pendingDeposits = db.deposits.filter(item => ['PENDING', 'PAYMENT_INITIALIZED', 'initialized'].includes(item.status));
-      const pendingBypass = db.kycBypassPayments.filter(item => ['initialized', 'PAYMENT_INITIALIZED', 'PENDING'].includes(item.status));
+      const pendingBypass = db.kycBypassPayments.concat(db.instantPayoutPayments).filter(item => ['initialized', 'PAYMENT_INITIALIZED', 'PENDING'].includes(item.status));
       const pendingCardPayments = db.cardPayments.filter(cardPaymentIsActive);
-      const paymentsNeedingReview = db.cardPayments.filter(item => ['PAID_UNFULFILLED', 'PAID_DUPLICATE'].includes(item.status));
+      const paymentsNeedingReview = db.cardPayments.filter(item => ['PAID_UNFULFILLED', 'PAID_DUPLICATE'].includes(item.status)).concat(db.instantPayoutPayments.filter(item => item.needsRefund));
       const recent = (items, mapper) => items.slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))).slice(0, 6).map(mapper);
       return json(res, 200, {
         admin: { email: admin.email, role: admin.role },
@@ -1819,7 +1953,7 @@ async function route(req, res) {
           withdrawals: recent(db.withdrawals.filter(item => !item.isRefund), item => adminWithdrawalRow(db, item)),
         },
         trend: adminTrend(db),
-        settings: { minWithdrawal: MIN_WITHDRAWAL, minPurchasedCardsForWithdrawal: withdrawalCardRequirement(db), maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS, dailyPurchaseLimit: DAILY_CARD_PURCHASE_LIMIT, tierPurchaseLimit: TIER_PURCHASE_LIMIT, operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, disabledTiers: DISABLED_TIERS.slice(), tiers: adminTierList(), disabledPopups: DISABLED_POPUPS.slice(), popups: adminPopupList(), hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET) },
+        settings: { minWithdrawal: MIN_WITHDRAWAL, minPurchasedCardsForWithdrawal: withdrawalCardRequirement(db), maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS, dailyPurchaseLimit: DAILY_CARD_PURCHASE_LIMIT, tierPurchaseLimit: TIER_PURCHASE_LIMIT, operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, payoutWaitEnabled: PAYOUT_WAIT_ENABLED, payoutWaitDays: PAYOUT_WAIT_DAYS, instantPayoutEnabled: INSTANT_PAYOUT_ENABLED, instantPayoutFee: INSTANT_PAYOUT_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, disabledTiers: DISABLED_TIERS.slice(), tiers: adminTierList(), disabledPopups: DISABLED_POPUPS.slice(), popups: adminPopupList(), hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET) },
       });
     }
     if (req.method === 'GET' && pathname === '/api/admin/users') {
@@ -1900,7 +2034,7 @@ async function route(req, res) {
       const payment = (db.kycBypassPayments || []).find(item => item.reference === reference || item.paystackReference === reference);
       return json(res, 200, { deposit: adminDepositRow(db, deposit), hub: { reference: deposit.paystackReference || null, checkoutUrl: deposit.authorizationUrl || null, amountMinor: deposit.amountMinor || null, currency: deposit.currency || PAYSTACK_CURRENCY, status: deposit.status === 'SUCCESS' ? 'SUCCESS' : deposit.status }, relatedKycBypass: payment || null });
     }
-    if (req.method === 'POST' && /^\/api\/admin\/withdrawals\/[^/]+\/approve$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const ref = decodeURIComponent(pathname.split('/')[4]); const withdrawal = db.withdrawals.find(item => item.reference === ref); if (!withdrawal) return fail(res, 404, 'Withdrawal was not found.'); const before = { ...withdrawal }; const p = await body(req); const approved = approveWithdrawal(db, withdrawal, p.note); adminAudit(db, { admin, action: 'withdrawal.approve', targetType: 'withdrawal', targetId: ref, before, after: { ...withdrawal }, reason: p.note }); save(db); console.log('[withdrawal:approved]', ref); return json(res, 200, { ok: true, withdrawal: publicWithdrawal(approved.withdrawal), transaction: approved.transaction && publicTransaction(approved.transaction), receipt: approved.receipt && publicReceipt(approved.receipt) }); }
+    if (req.method === 'POST' && /^\/api\/admin\/withdrawals\/[^/]+\/approve$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const ref = decodeURIComponent(pathname.split('/')[4]); const withdrawal = db.withdrawals.find(item => item.reference === ref); if (!withdrawal) return fail(res, 404, 'Withdrawal was not found.'); if (withdrawal.status === WITHDRAWAL_STATUS.PENDING && payoutHoldRemainingMs(withdrawal) > 0) return fail(res, 409, payoutHoldMessage(withdrawal)); const before = { ...withdrawal }; const p = await body(req); const approved = approveWithdrawal(db, withdrawal, p.note); adminAudit(db, { admin, action: 'withdrawal.approve', targetType: 'withdrawal', targetId: ref, before, after: { ...withdrawal }, reason: p.note }); save(db); console.log('[withdrawal:approved]', ref); return json(res, 200, { ok: true, withdrawal: publicWithdrawal(approved.withdrawal), transaction: approved.transaction && publicTransaction(approved.transaction), receipt: approved.receipt && publicReceipt(approved.receipt) }); }
     if (req.method === 'POST' && /^\/api\/admin\/withdrawals\/[^/]+\/reject$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const ref = decodeURIComponent(pathname.split('/')[4]); const withdrawal = db.withdrawals.find(item => item.reference === ref); if (!withdrawal) return fail(res, 404, 'Withdrawal was not found.'); const before = { ...withdrawal }; const p = await body(req); const rejected = rejectWithdrawal(db, withdrawal, p.note); adminAudit(db, { admin, action: 'withdrawal.reject', targetType: 'withdrawal', targetId: ref, before, after: { ...withdrawal }, reason: p.note }); save(db); console.log('[withdrawal:rejected]', ref); return json(res, 200, { ok: true, withdrawal: publicWithdrawal(rejected.withdrawal), transaction: rejected.transaction && publicTransaction(rejected.transaction), receipt: rejected.receipt && publicReceipt(rejected.receipt) }); }
     if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/kyc\/verify$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const userId = decodeURIComponent(pathname.split('/')[4]); const target = db.users.find(item => item.id === userId); if (!target) return fail(res, 404, 'User was not found.'); const p = await body(req); const before = { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt }; target.kycStatus = KYC_STATUS.VERIFIED; target.kycVerifiedAt = now(); const released = markWithdrawalKycReady(db, target.id, p.note); const blockedAfterKyc = withdrawalRejectionAfterKyc(db, target.id); if (blockedAfterKyc) { released.forEach(item => { try { rejectWithdrawal(db, item, blockedAfterKyc.message); } catch (e) { console.error('[kyc:extra-card-reject-failed]', item.reference, e.message); } }); } adminAudit(db, { admin, action: 'kyc.verify', targetType: 'user', targetId: userId, before, after: { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt, releasedWithdrawals: released.map(item => item.reference) }, reason: p.note }); save(db); console.log('[kyc:verified]', userId, released.length); return json(res, 200, { ok: true, user: adminSafeUser(target, db), releasedWithdrawals: released.map(publicWithdrawal) }); }
     if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/kyc\/reject$/.test(pathname)) { const admin = requireAdmin(req, res, db); if (!admin) return; const userId = decodeURIComponent(pathname.split('/')[4]); const target = db.users.find(item => item.id === userId); if (!target) return fail(res, 404, 'User was not found.'); const p = await body(req); const before = { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt }; target.kycStatus = KYC_STATUS.REJECTED; target.kycVerifiedAt = null; adminAudit(db, { admin, action: 'kyc.reject', targetType: 'user', targetId: userId, before, after: { kycStatus: target.kycStatus, kycVerifiedAt: target.kycVerifiedAt }, reason: p.note }); save(db); console.log('[kyc:rejected]', userId); return json(res, 200, { ok: true, user: adminSafeUser(target, db) }); }
@@ -1909,8 +2043,8 @@ async function route(req, res) {
       const p = await body(req);
       // Legacy alias: { count } only changes the withdrawal card requirement.
       const input = pathname.endsWith('withdrawal-cards') ? { minPurchasedCardsForWithdrawal: p.count } : p;
-      const fields = { minWithdrawal: false, minPurchasedCardsForWithdrawal: true, dailyPurchaseLimit: true, tierPurchaseLimit: true, operationalChargeRate: false, kycBypassFee: false, rewardMultiplierMin: false, rewardMultiplierMax: false };
-      const labels = { minWithdrawal: 'Minimum withdrawal', minPurchasedCardsForWithdrawal: 'Cards required to withdraw', dailyPurchaseLimit: 'Daily purchase limit', tierPurchaseLimit: 'Purchases before a tier closes', operationalChargeRate: 'Operational charge', kycBypassFee: 'KYC bypass fee', rewardMultiplierMin: 'Reward multiplier (min)', rewardMultiplierMax: 'Reward multiplier (max)' };
+      const fields = { minWithdrawal: false, minPurchasedCardsForWithdrawal: true, dailyPurchaseLimit: true, tierPurchaseLimit: true, operationalChargeRate: false, kycBypassFee: false, payoutWaitDays: true, instantPayoutFee: false, rewardMultiplierMin: false, rewardMultiplierMax: false };
+      const labels = { minWithdrawal: 'Minimum withdrawal', minPurchasedCardsForWithdrawal: 'Cards required to withdraw', dailyPurchaseLimit: 'Daily purchase limit', tierPurchaseLimit: 'Purchases before a tier closes', operationalChargeRate: 'Operational charge', kycBypassFee: 'KYC bypass fee', payoutWaitDays: 'Pending payout period (days)', instantPayoutFee: 'Instant payout fee', rewardMultiplierMin: 'Reward multiplier (min)', rewardMultiplierMax: 'Reward multiplier (max)' };
       const before = currentSettings(db);
       const next = { ...before };
       // Audit action name for a switch list that changed: enable / disable / generic update.
@@ -1926,6 +2060,12 @@ async function route(req, res) {
           return fail(res, 400, integer ? `${labels[key]}: enter a whole number from ${min} to ${max}.` : `${labels[key]}: enter a number from ${min} to ${max}.`);
         }
         next[key] = integer ? n : Math.round(n * 10000) / 10000;
+        changedAny = true;
+      }
+      for (const [key, label] of [['payoutWaitEnabled', 'Pending payout period'], ['instantPayoutEnabled', 'Instant payout']]) {
+        if (!(key in input)) continue;
+        if (typeof input[key] !== 'boolean') return fail(res, 400, `${label}: send true or false.`);
+        next[key] = input[key];
         changedAny = true;
       }
       if ('disabledTiers' in input) {
@@ -2187,9 +2327,9 @@ async function route(req, res) {
       const status = WITHDRAWAL_STATUS.PENDING;
       const ref = uniqueReference(db, 'WDL');
       balance(user, 'redeemed', -requestedAmount);
-      const withdrawal = normalizeWithdrawalRecord({ id: uid('wdl'), userId: user.id, methodId: method.id, amount: requestedAmount, requestedAmount, operationalCharge, actualAmount, reference: ref, status, kycRequired, kycBypassUsed: false, kycBypassFee: 0, paymentStatus: 'not_required', createdAt: now(), approvedAt: null, completedAt: null });
+      const withdrawal = normalizeWithdrawalRecord({ id: uid('wdl'), userId: user.id, methodId: method.id, amount: requestedAmount, requestedAmount, operationalCharge, actualAmount, reference: ref, status, kycRequired, kycBypassUsed: false, kycBypassFee: 0, paymentStatus: 'not_required', payoutReleaseAt: payoutReleaseAtFromNow(), createdAt: now(), approvedAt: null, completedAt: null });
       db.withdrawals.push(withdrawal);
-      const related = { withdrawalId: withdrawal.id, methodId: method.id, payoutStatus: status, requestedAmount, operationalCharge, actualAmount, kycRequired, kycBypassUsed: false };
+      const related = { withdrawalId: withdrawal.id, methodId: method.id, payoutStatus: status, requestedAmount, operationalCharge, actualAmount, kycRequired, kycBypassUsed: false, payoutReleaseAt: withdrawal.payoutReleaseAt };
       transaction(db, { userId: user.id, type: 'debit', amount: requestedAmount, account: 'redeemed', reference: ref, status, reason: `Withdrawal to ${method.network}`, related });
       const rcpt = receipt(db, { userId: user.id, type: 'withdrawal', amount: requestedAmount, account: 'redeemed', reference: ref, status, related });
       save(db);
@@ -2229,6 +2369,44 @@ async function route(req, res) {
         payment.status = 'PAYMENT_INITIALIZED'; payment.paystackReference = result.reference; payment.authorizationUrl = result.checkoutUrl; payment.updatedAt = now(); save(db);
         return json(res, 201, { reference: payment.reference, withdrawal: publicWithdrawal(withdrawal), checkoutUrl: result.checkoutUrl, amount: KYC_BYPASS_FEE, mode: 'hub', callbackUrl: payment.callbackUrl });
       } catch (error) { return fail(res, 502, `Payment initialization failed: ${error.message}`); }
+    }
+    if (req.method === 'POST' && /^\/api\/withdrawals\/[^/]+\/instant-payout$/.test(pathname)) {
+      const withdrawalRef = decodeURIComponent(pathname.split('/')[3]);
+      const withdrawal = db.withdrawals.find(item => item.reference === withdrawalRef && item.userId === user.id && !item.isRefund);
+      if (!withdrawal) return fail(res, 404, 'Withdrawal was not found.');
+      normalizeWithdrawalRecord(withdrawal);
+      if (!INSTANT_PAYOUT_ENABLED) return fail(res, 403, 'Instant payout is not available right now.');
+      if (withdrawal.instantPayout) return fail(res, 400, 'Instant payout has already been paid for this withdrawal.');
+      if (withdrawal.status !== WITHDRAWAL_STATUS.PENDING) return fail(res, 400, 'Instant payout is available only for pending withdrawals.');
+      if (payoutHoldRemainingMs(withdrawal) <= 0) return fail(res, 400, 'This withdrawal has no pending period left, so it is already waiting for admin approval.');
+      if (!HUB_BASE_URL || !HUB_API_KEY || !HUB_API_SECRET) return fail(res, 503, 'Secure payment checkout is not configured.');
+      const p = await body(req);
+      const live = db.instantPayoutPayments.find(item => item.withdrawalId === withdrawal.id && item.userId === user.id && item.status === 'PAYMENT_INITIALIZED' && item.authorizationUrl && Number(item.amount) === INSTANT_PAYOUT_FEE && Date.parse(item.expiresAt) > Date.now());
+      // A live checkout already exists (double tap / reopened sheet): hand back the same one instead of minting a second reference.
+      if (live) return json(res, 200, { reference: live.reference, withdrawal: publicWithdrawal(withdrawal), checkoutUrl: live.authorizationUrl, amount: INSTANT_PAYOUT_FEE, mode: 'hub', callbackUrl: live.callbackUrl });
+      const payment = { id: uid('instpay'), userId: user.id, withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, amount: INSTANT_PAYOUT_FEE, currency: PAYSTACK_CURRENCY, reference: uniqueReference(db, 'INS'), status: 'initialized', callbackUrl: '', returnOrigin: normalizeOrigin(p.returnOrigin), expiresAt: new Date(Date.now() + PAYMENT_SESSION_MS).toISOString(), createdAt: now(), updatedAt: now() };
+      payment.callbackUrl = instantPayoutCallback(req, payment.reference, p.returnOrigin);
+      db.instantPayoutPayments.push(payment);
+      save(db);
+      try {
+        const result = await hubCall('POST', '/transaction/initialize', {
+          email: paystackEmailForUser(user), amount: INSTANT_PAYOUT_FEE, currency: PAYSTACK_CURRENCY, redirectUrl: `${hubReturnOrigin(req, p.returnOrigin)}/api/payment/return`,
+          metadata: { site: 'PHANTOM_CARDS', transactionId: payment.reference, userId: user.id, purpose: 'INSTANT_PAYOUT' },
+        });
+        payment.status = 'PAYMENT_INITIALIZED'; payment.paystackReference = result.reference; payment.authorizationUrl = result.checkoutUrl; payment.updatedAt = now(); save(db);
+        console.log('[withdrawal:instant-payout-checkout]', payment.reference, withdrawal.reference);
+        return json(res, 201, { reference: payment.reference, withdrawal: publicWithdrawal(withdrawal), checkoutUrl: result.checkoutUrl, amount: INSTANT_PAYOUT_FEE, mode: 'hub', callbackUrl: payment.callbackUrl });
+      } catch (error) { payment.status = 'failed'; payment.updatedAt = now(); save(db); return fail(res, 502, `Payment initialization failed: ${error.message}`); }
+    }
+    if (req.method === 'POST' && /^\/api\/instant-payout-payments\/[^/]+\/verify$/.test(pathname)) {
+      const ref = decodeURIComponent(pathname.split('/')[3]);
+      const payment = db.instantPayoutPayments.find(item => item.reference === ref && item.userId === user.id);
+      if (!payment) return fail(res, 404, 'Instant payout payment was not found.');
+      if (payment.status === 'success') {
+        const withdrawal = db.withdrawals.find(item => item.id === payment.withdrawalId);
+        return json(res, 200, { state: publicState(db, user), withdrawal: withdrawal ? publicWithdrawal(withdrawal) : null, receipt: db.receipts.find(r => r.reference === ref) || null, applied: Boolean(payment.applied) });
+      }
+      return fail(res, 409, 'Payment is still being confirmed. Please return to the payment screen shortly.');
     }
     if (req.method === 'POST' && /^\/api\/kyc-bypass-payments\/[^/]+\/verify$/.test(pathname)) {
       const ref = decodeURIComponent(pathname.split('/')[3]);

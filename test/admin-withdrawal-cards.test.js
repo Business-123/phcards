@@ -119,5 +119,6 @@ test('admin can edit every setting and users see the new values', { timeout: 200
   assert.equal(config.kycBypassFee, 40);
   assert.equal(config.operationalChargeRate, 0.05);
   const persisted = JSON.parse(fs.readFileSync(dataFile, 'utf8')).settings;
-  assert.deepEqual({ ...persisted }, { ...payload, disabledTiers: [], disabledPopups: [] }, 'persisted to disk');
+  // The payout-timing settings were not part of this payload, so they keep their defaults.
+  assert.deepEqual({ ...persisted }, { ...payload, payoutWaitEnabled: true, payoutWaitDays: 7, instantPayoutEnabled: true, instantPayoutFee: 100, disabledTiers: [], disabledPopups: [] }, 'persisted to disk');
 });

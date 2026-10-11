@@ -16,6 +16,8 @@ Withdrawals unlock after **three lifetime card redemptions**. The requested amou
 
 **One extra card after KYC.** Once a user has met every requirement and is KYC verified, the withdrawal is rejected with "Withdrawal rejected: you need to purchase one more card." until they have bought one more card than the configured requirement (`KYC_EXTRA_CARDS` in `server.js`). Nothing is deducted. If they paid the KYC fee through the checkout, they are still marked verified, the fee is refunded, and no withdrawal is created.
 
+**Pending payout period and instant payout.** A new withdrawal stays `pending` for **7 days** (`payoutReleaseAt` on the withdrawal) before an admin can approve it; the admin API answers `409` and the Approve button is disabled until then. A user can pay **GHS 100** through the hub checkout (`POST /api/withdrawals/:reference/instant-payout`, purpose `INSTANT_PAYOUT`) to skip the wait on that one withdrawal. As with the KYC fee, paying never approves anything: the withdrawal stays pending, is flagged `instantPayout`, its hold is lifted, and it shows as "Approve now" in the admin queue. The fee is recorded as an `external` transaction and never touches Redeemed Balance. Admin Settings controls: `payoutWaitEnabled` (off = no waiting period; this also releases withdrawals already waiting), `payoutWaitDays`, `instantPayoutEnabled` and `instantPayoutFee`. A change to the number of days applies to withdrawals submitted afterwards; older withdrawals keep their stored release date (and withdrawals created before this feature have none).
+
 Copy `.env.example` to `.env` and configure `HUB_BASE_URL`, `HUB_API_KEY`, and
 `HUB_API_SECRET` with the credentials the Payment Hub issues for this merchant.
 
