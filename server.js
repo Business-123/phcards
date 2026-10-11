@@ -68,6 +68,7 @@ function withdrawalCardRequirement(db) {
 let OPERATIONAL_CHARGE_RATE = 0.10;
 let KYC_BYPASS_FEE = 70;
 let DISABLED_TIERS = []; // tier keys an admin has switched off for every user (db.settings.disabledTiers)
+let DISABLED_POPUPS = []; // withdrawal pop-ups (requirements) an admin has switched off (db.settings.disabledPopups)
 
 // ---- Admin-editable settings -------------------------------------------------
 // Every value below can be changed by an admin (Settings page). They are stored in
@@ -83,12 +84,17 @@ const SETTING_LIMITS = {
   rewardMultiplierMax: { min: 0.1, max: 50 },
 };
 function settingsDefaults() {
-  return { minWithdrawal: 100, minPurchasedCardsForWithdrawal: MIN_PURCHASED_CARDS_FOR_WITHDRAWAL, dailyPurchaseLimit: 3, tierPurchaseLimit: 2, operationalChargeRate: 0.10, kycBypassFee: 70, rewardMultiplierMin: 3.52, rewardMultiplierMax: 4.42, disabledTiers: [] };
+  return { minWithdrawal: 100, minPurchasedCardsForWithdrawal: MIN_PURCHASED_CARDS_FOR_WITHDRAWAL, dailyPurchaseLimit: 3, tierPurchaseLimit: 2, operationalChargeRate: 0.10, kycBypassFee: 70, rewardMultiplierMin: 3.52, rewardMultiplierMax: 4.42, disabledTiers: [], disabledPopups: [] };
 }
 // Tiers an admin has switched off. Unknown keys are dropped; order follows PRICE_TIERS.
 function cleanDisabledTiers(value) {
   const wanted = new Set(Array.isArray(value) ? value.map(String) : []);
   return PRICE_TIERS.map(t => t.key).filter(key => wanted.has(key));
+}
+// Withdrawal pop-ups an admin has switched off. Unknown keys are dropped; order follows WITHDRAWAL_POPUPS.
+function cleanDisabledPopups(value) {
+  const wanted = new Set(Array.isArray(value) ? value.map(String) : []);
+  return WITHDRAWAL_POPUP_KEYS.filter(key => wanted.has(key));
 }
 function cleanSettings(raw) {
   const d = settingsDefaults();
@@ -109,6 +115,7 @@ function cleanSettings(raw) {
     rewardMultiplierMin: pick('rewardMultiplierMin', src.rewardMultiplierMin),
     rewardMultiplierMax: pick('rewardMultiplierMax', src.rewardMultiplierMax),
     disabledTiers: cleanDisabledTiers(src.disabledTiers),
+    disabledPopups: cleanDisabledPopups(src.disabledPopups),
   };
   if (out.rewardMultiplierMin > out.rewardMultiplierMax) { out.rewardMultiplierMin = d.rewardMultiplierMin; out.rewardMultiplierMax = d.rewardMultiplierMax; }
   return out;
@@ -121,6 +128,7 @@ function applySettings(settings) {
   OPERATIONAL_CHARGE_RATE = s.operationalChargeRate;
   KYC_BYPASS_FEE = s.kycBypassFee;
   DISABLED_TIERS = s.disabledTiers;
+  DISABLED_POPUPS = s.disabledPopups;
   REWARD_MULTIPLIER_MIN = s.rewardMultiplierMin;
   REWARD_MULTIPLIER_MAX = s.rewardMultiplierMax;
   return s;
@@ -318,6 +326,23 @@ function closedTierKeys(db, userId) {
 }
 // Admin switch: a disabled tier is hidden from every user's shop and can't be bought.
 function tierDisabled(priceKey) { return DISABLED_TIERS.includes(priceKey); }
+// The pop-ups a user can hit when a withdrawal is blocked. Each one is also the rule behind it:
+// switching a pop-up off means that requirement is no longer enforced, so the user is never
+// stopped (or shown the pop-up) for it. Admin switches live in Settings -> "Withdrawal pop-ups".
+const WITHDRAWAL_POPUP_KEYS = ['withdrawalLimit', 'cardsNeeded', 'oneMoreCard', 'redeemFiveCards'];
+function popupDisabled(key) { return DISABLED_POPUPS.includes(key); }
+function adminPopupList() {
+  const defs = {
+    withdrawalLimit: { label: 'Withdrawal limit not reached', description: 'Shown when the redeemed balance is below the minimum withdrawal.' },
+    cardsNeeded: { label: 'N more cards', description: 'Shown when the user has not bought enough cards to unlock withdrawals.' },
+    oneMoreCard: { label: 'One more card', description: 'Shown after KYC when the user must buy one more card than the requirement.' },
+    redeemFiveCards: { label: `Redeem ${FINAL_REDEEMED_CARDS} cards in total`, description: `Final stage: shown until the user has redeemed ${FINAL_REDEEMED_CARDS} cards (the free gift counts).` },
+  };
+  return WITHDRAWAL_POPUP_KEYS.map(key => ({ key, ...defs[key], enabled: !popupDisabled(key) }));
+}
+// Smallest withdrawal accepted. With the "withdrawal limit" pop-up off there is no minimum
+// beyond a positive amount.
+function effectiveMinWithdrawal() { return popupDisabled('withdrawalLimit') ? 0.01 : MIN_WITHDRAWAL; }
 function adminTierList() {
   return PRICE_TIERS.map(t => ({ key: t.key, min: t.min, max: t.max, label: priceTierLabel(t.key), enabled: !tierDisabled(t.key) }));
 }
@@ -516,9 +541,9 @@ const FINAL_REDEEMED_CODE = 'NEEDS_FIVE_REDEEMED_CARDS';
 // The single source of truth for what blocks a verified user from withdrawing, in order.
 // Returns null when nothing blocks them. `progress` is what the client shows as "4/5".
 function withdrawalRejectionAfterKyc(db, userId) {
-  if (needsExtraCardAfterKyc(db, userId)) return { code: ONE_MORE_CARD_CODE, message: ONE_MORE_CARD_MESSAGE };
+  if (!popupDisabled('oneMoreCard') && needsExtraCardAfterKyc(db, userId)) return { code: ONE_MORE_CARD_CODE, message: ONE_MORE_CARD_MESSAGE };
   const redeemed = redeemedCardsCount(db, userId);
-  if (redeemed < FINAL_REDEEMED_CARDS) {
+  if (!popupDisabled('redeemFiveCards') && redeemed < FINAL_REDEEMED_CARDS) {
     return {
       code: FINAL_REDEEMED_CODE,
       message: `Withdrawal rejected: you must redeem ${FINAL_REDEEMED_CARDS} cards in total before withdrawal. You have redeemed ${redeemed}/${FINAL_REDEEMED_CARDS}.`,
@@ -805,6 +830,7 @@ function publicState(db, user) {
     purchaseLimits: { date: purchaseDate, max: DAILY_CARD_PURCHASE_LIMIT, count: dailyPurchaseCount, resetAt: nextGhanaMidnightIso(), tierMax: TIER_PURCHASE_LIMIT },
     closedTiers,
     disabledTiers: DISABLED_TIERS.slice(),
+    disabledPopups: DISABLED_POPUPS.slice(),
   };
 }
 function publicCard(card) {
@@ -1793,7 +1819,7 @@ async function route(req, res) {
           withdrawals: recent(db.withdrawals.filter(item => !item.isRefund), item => adminWithdrawalRow(db, item)),
         },
         trend: adminTrend(db),
-        settings: { minWithdrawal: MIN_WITHDRAWAL, minPurchasedCardsForWithdrawal: withdrawalCardRequirement(db), maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS, dailyPurchaseLimit: DAILY_CARD_PURCHASE_LIMIT, tierPurchaseLimit: TIER_PURCHASE_LIMIT, operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, disabledTiers: DISABLED_TIERS.slice(), tiers: adminTierList(), hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET) },
+        settings: { minWithdrawal: MIN_WITHDRAWAL, minPurchasedCardsForWithdrawal: withdrawalCardRequirement(db), maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS, dailyPurchaseLimit: DAILY_CARD_PURCHASE_LIMIT, tierPurchaseLimit: TIER_PURCHASE_LIMIT, operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, disabledTiers: DISABLED_TIERS.slice(), tiers: adminTierList(), disabledPopups: DISABLED_POPUPS.slice(), popups: adminPopupList(), hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET) },
       });
     }
     if (req.method === 'GET' && pathname === '/api/admin/users') {
@@ -1887,7 +1913,9 @@ async function route(req, res) {
       const labels = { minWithdrawal: 'Minimum withdrawal', minPurchasedCardsForWithdrawal: 'Cards required to withdraw', dailyPurchaseLimit: 'Daily purchase limit', tierPurchaseLimit: 'Purchases before a tier closes', operationalChargeRate: 'Operational charge', kycBypassFee: 'KYC bypass fee', rewardMultiplierMin: 'Reward multiplier (min)', rewardMultiplierMax: 'Reward multiplier (max)' };
       const before = currentSettings(db);
       const next = { ...before };
-      const tierAction = () => { const was = new Set(before.disabledTiers), now_ = new Set(next.disabledTiers); const off = next.disabledTiers.filter(k => !was.has(k)); const on = before.disabledTiers.filter(k => !now_.has(k)); return off.length ? (on.length ? 'settings.update' : 'settings.tier.disable') : on.length ? 'settings.tier.enable' : 'settings.update'; };
+      // Audit action name for a switch list that changed: enable / disable / generic update.
+      const switchAction = (noun, wasList, nowList) => { const was = new Set(wasList), now_ = new Set(nowList); const off = nowList.filter(k => !was.has(k)); const on = wasList.filter(k => !now_.has(k)); return off.length ? (on.length ? 'settings.update' : `settings.${noun}.disable`) : on.length ? `settings.${noun}.enable` : 'settings.update'; };
+      const settingsAction = () => { const t = switchAction('tier', before.disabledTiers, next.disabledTiers); return t !== 'settings.update' ? t : switchAction('popup', before.disabledPopups, next.disabledPopups); };
       let changedAny = false;
       for (const [key, integer] of Object.entries(fields)) {
         if (!(key in input)) continue;
@@ -1908,15 +1936,22 @@ async function route(req, res) {
         next.disabledTiers = cleanDisabledTiers(input.disabledTiers);
         changedAny = true;
       }
+      if ('disabledPopups' in input) {
+        if (!Array.isArray(input.disabledPopups)) return fail(res, 400, 'Pop-up switches: send a list of pop-up keys.');
+        const unknown = input.disabledPopups.map(String).filter(k => !WITHDRAWAL_POPUP_KEYS.includes(k));
+        if (unknown.length) return fail(res, 400, `Unknown pop-up: ${unknown.join(', ')}.`);
+        next.disabledPopups = cleanDisabledPopups(input.disabledPopups);
+        changedAny = true;
+      }
       if (!changedAny) return fail(res, 400, 'No settings were provided.');
       if (next.rewardMultiplierMin > next.rewardMultiplierMax) return fail(res, 400, 'Reward multiplier (min) cannot be higher than the maximum.');
       db.settings = next;
       applySettings(next);
       db.cards = syncCardCatalog(db.cards); // reward ranges shown on cards follow the new multipliers
-      adminAudit(db, { admin, action: tierAction(), targetType: 'settings', targetId: 'settings', before, after: next, reason: String(p.note || '').slice(0, 500) });
+      adminAudit(db, { admin, action: settingsAction(), targetType: 'settings', targetId: 'settings', before, after: next, reason: String(p.note || '').slice(0, 500) });
       save(db);
       console.log('[settings:update]', JSON.stringify(before), '->', JSON.stringify(next));
-      return json(res, 200, { ok: true, settings: { ...next, tiers: adminTierList(), maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS }, minPurchasedCardsForWithdrawal: next.minPurchasedCardsForWithdrawal });
+      return json(res, 200, { ok: true, settings: { ...next, tiers: adminTierList(), popups: adminPopupList(), maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS }, minPurchasedCardsForWithdrawal: next.minPurchasedCardsForWithdrawal });
     }
     if (req.method === 'POST' && /^\/api\/admin\/users\/[^/]+\/balance-purchase$/.test(pathname)) {
       const admin = requireAdmin(req, res, db); if (!admin) return;
@@ -2074,7 +2109,7 @@ async function route(req, res) {
       const requestedAmount = money(p.amount);
       const method = db.methods.find(m => m.id === p.methodId && m.userId === user.id);
       // The GHS withdrawal limit is checked first, before the card-count requirement.
-      if (user.redeemedBalance < MIN_WITHDRAWAL) {
+      if (!popupDisabled('withdrawalLimit') && user.redeemedBalance < MIN_WITHDRAWAL) {
         const hasPurchasedCard = db.purchases.some(item => item.userId === user.id && !item.isFreeGift && Number(item.amountPaid ?? item.amount ?? 0) > 0);
         return fail(res, 400, hasPurchasedCard
           ? `Withdrawals start at GHS ${MIN_WITHDRAWAL.toFixed(2)}. Your redeemed balance is GHS ${money(user.redeemedBalance).toFixed(2)}, so redeem more cards to reach it.`
@@ -2082,12 +2117,12 @@ async function route(req, res) {
       }
       const purchasedCards = purchasedCardsCount(db, user.id);
       const requiredCards = withdrawalCardRequirement(db);
-      if (purchasedCards < requiredCards) {
+      if (!popupDisabled('cardsNeeded') && purchasedCards < requiredCards) {
         const remaining = Math.max(0, requiredCards - purchasedCards);
         return fail(res, 400, `Purchase ${remaining} more card${remaining === 1 ? '' : 's'} to unlock withdrawals.`);
       }
       if (!method) return fail(res, 400, 'Choose a saved withdrawal method.');
-      if (!Number.isFinite(requestedAmount) || requestedAmount < MIN_WITHDRAWAL) return fail(res, 400, `Minimum withdrawal is GHS ${MIN_WITHDRAWAL.toFixed(2)}.`);
+      if (!Number.isFinite(requestedAmount) || requestedAmount < effectiveMinWithdrawal()) return fail(res, 400, popupDisabled('withdrawalLimit') ? 'Enter a withdrawal amount.' : `Minimum withdrawal is GHS ${MIN_WITHDRAWAL.toFixed(2)}.`);
       if (requestedAmount > user.redeemedBalance) return fail(res, 400, 'Withdrawal amount exceeds redeemed balance.');
       if (!user.pinHash || !await passwordMatches(String(p.pin || ''), user.pinHash)) return fail(res, 401, 'Incorrect withdrawal PIN.');
       const operationalCharge = money(requestedAmount * OPERATIONAL_CHARGE_RATE);

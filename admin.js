@@ -262,6 +262,31 @@
             render('settings');
         } catch (error) { toast(error.message); document.querySelectorAll('#tierList [data-toggle-tier]').forEach(b => { b.disabled = false; }); }
     }
+    // ---- Withdrawal pop-ups: each blocking pop-up (and the rule behind it) can be switched off ----
+    const FALLBACK_POPUPS = [
+        { key: 'withdrawalLimit', label: 'Withdrawal limit not reached', description: 'Shown when the redeemed balance is below the minimum withdrawal.' },
+        { key: 'cardsNeeded', label: 'N more cards', description: 'Shown when the user has not bought enough cards to unlock withdrawals.' },
+        { key: 'oneMoreCard', label: 'One more card', description: 'Shown after KYC when the user must buy one more card than the requirement.' },
+        { key: 'redeemFiveCards', label: 'Redeem 5 cards in total', description: 'Final stage: shown until the user has redeemed 5 cards.' },
+    ];
+    function popupsPanel(s) {
+        const popups = Array.isArray(s.popups) && s.popups.length ? s.popups : FALLBACK_POPUPS;
+        const disabled = new Set(Array.isArray(s.disabledPopups) ? s.disabledPopups : []);
+        const rows = popups.map(p => { const on = !disabled.has(p.key); return `<div class="tier-row"><div class="tier-info"><strong>${escape(p.label)}</strong><small>${escape(p.description || '')} ${on ? '<b>On:</b> users are stopped and see this pop-up.' : '<b>Off:</b> this requirement is not enforced and the pop-up never shows.'}</small></div><button type="button" class="tier-switch${on ? ' on' : ''}" role="switch" aria-checked="${on}" aria-label="${escape(p.label)} pop-up" data-toggle-popup="${escape(p.key)}" data-enabled="${on ? '1' : '0'}"><span></span></button></div>`; }).join('');
+        return `<div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Withdrawal pop-ups</h3></div><p style="color:var(--muted);line-height:1.7;margin:0 0 14px">These are the pop-ups users see when a withdrawal is blocked. Switch one off to stop enforcing that requirement, so users are no longer stopped by it or shown the pop-up. Changes apply right away. Switch it back on to restore it.</p><div class="tier-list" id="popupList">${rows}</div></div>`;
+    }
+    async function togglePopup(button) {
+        const key = button.dataset.togglePopup; const enable = button.dataset.enabled !== '1';
+        const current = new Set(state.summary?.settings?.disabledPopups || []);
+        if (enable) current.delete(key); else current.add(key);
+        document.querySelectorAll('#popupList [data-toggle-popup]').forEach(b => { b.disabled = true; });
+        try {
+            const result = await api('/api/admin/settings', { method: 'POST', body: JSON.stringify({ disabledPopups: [...current], note: enable ? `Enabled pop-up ${key}` : `Disabled pop-up ${key}` }) });
+            state.summary.settings = { ...(state.summary.settings || {}), ...result.settings };
+            toast(enable ? 'Pop-up enabled. Users are stopped by it again.' : 'Pop-up disabled. This requirement is no longer enforced.');
+            render('settings');
+        } catch (error) { toast(error.message); document.querySelectorAll('#popupList [data-toggle-popup]').forEach(b => { b.disabled = false; }); }
+    }
     function settingsFormState() {
         const inputs = [...document.querySelectorAll('#settingsForm [data-setting]')];
         const changed = inputs.filter(i => i.value !== i.dataset.original);
@@ -296,7 +321,7 @@
             render('settings');
         } catch (error) { toast(error.message); syncSettingsControls(); }
     }
-    function renderSettings() { const s = state.summary?.settings || {}; return pageHeading('Settings', 'Operational configuration. Every value below can be edited.') + tiersPanel(s) + settingsPanel(s) + `<div class="settings-grid" style="margin-top:16px"><div class="setting"><span>Payment service</span><strong>${s.hubConfigured ? 'Configured' : 'Not configured'}</strong></div></div><div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Financial safety</h3></div><p style="color:var(--muted);line-height:1.7;margin:0">Direct balance editing, payment status editing, transaction editing, and environment-secret editing are not available in this console. Corrections must be represented by controlled backend workflows and audited compensating records.</p></div>`; }
+    function renderSettings() { const s = state.summary?.settings || {}; return pageHeading('Settings', 'Operational configuration. Every value below can be edited.') + tiersPanel(s) + popupsPanel(s) + settingsPanel(s) + `<div class="settings-grid" style="margin-top:16px"><div class="setting"><span>Payment service</span><strong>${s.hubConfigured ? 'Configured' : 'Not configured'}</strong></div></div><div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Financial safety</h3></div><p style="color:var(--muted);line-height:1.7;margin:0">Direct balance editing, payment status editing, transaction editing, and environment-secret editing are not available in this console. Corrections must be represented by controlled backend workflows and audited compensating records.</p></div>`; }
     function renderReconciliation() { return pageHeading('Payment reconciliation', 'Compare app and Payment Hub references before investigating a top-up.') + `<section class="panel"><div class="panel-heading"><h3>Open a deposit from the Deposits page</h3></div><p style="margin:0;color:var(--muted);line-height:1.7">Deposits store the Payment Hub / Paystack reference alongside the local record, so the console clearly labels any unavailable external data instead of inventing a status.</p><button class="primary-button" style="margin-top:18px" data-go="deposits">View deposits</button></section>`; }
 
     async function openDetail(type, id) {
@@ -324,6 +349,8 @@
         if (balanceBtn) return toggleBalancePurchase(balanceBtn);
         const tierBtn = event.target.closest('[data-toggle-tier]');
         if (tierBtn) return toggleTier(tierBtn);
+        const popupBtn = event.target.closest('[data-toggle-popup]');
+        if (popupBtn) return togglePopup(popupBtn);
         if (event.target.closest('#settingsSave')) return saveSettings();
         if (event.target.closest('#settingsReset')) { document.querySelectorAll('#settingsForm [data-setting]').forEach(i => { i.value = i.dataset.original; }); return syncSettingsControls(); }
         const navButton = event.target.closest('[data-view]'); if (navButton) return nav(navButton.dataset.view);

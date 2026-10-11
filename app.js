@@ -1,7 +1,15 @@
 /* PHANTOM CARDS API bridge. The page owns presentation; this module owns persisted product flows. */
 (function () {
     const DEFAULT_MIN_WITHDRAWAL = 100; // GHS; the live value arrives with the server state
+    // Withdrawal pop-ups an admin has switched off (Admin -> Settings -> Withdrawal pop-ups).
+    // A switched-off pop-up means its requirement is not enforced. Only the up-front checks use
+    // this; if the server still rejects a request (e.g. the admin flipped a switch a moment ago),
+    // the pop-up is shown regardless, because the server is the source of truth.
+    function popupOff(key) {
+        return Array.isArray(state.disabledPopups) && state.disabledPopups.includes(key);
+    }
     function minWithdrawal() {
+        if (popupOff('withdrawalLimit')) return 0.01; // no minimum beyond a positive amount
         const n = Number(state.minWithdrawal);
         return Number.isFinite(n) && n > 0 ? n : DEFAULT_MIN_WITHDRAWAL;
     }
@@ -122,6 +130,7 @@
         state.purchaseLimits = data.purchaseLimits || { date: '', max: 3, count: 0, resetAt: null };
         state.closedTiers = Array.isArray(data.closedTiers) ? data.closedTiers : [];
         state.disabledTiers = Array.isArray(data.disabledTiers) ? data.disabledTiers : [];
+        state.disabledPopups = Array.isArray(data.disabledPopups) ? data.disabledPopups : [];
         if (Number(data.kycBypassFee) > 0) KYC_BYPASS_FEE = Number(data.kycBypassFee);
         if (Number.isFinite(Number(data.operationalChargeRate)) && data.operationalChargeRate !== null && data.operationalChargeRate !== '') OPERATIONAL_CHARGE_RATE = Number(data.operationalChargeRate);
         state.withdrawals = data.withdrawals || [];
@@ -1271,10 +1280,10 @@
             showToast('warning', 'Please log in to request a withdrawal.');
             return safeNavigate('login', 'withdraw-auth');
         }
-        if (Number(state.user?.redeemedBalance || 0) < minWithdrawal()) return showWithdrawalLimitNotice();
+        if (!popupOff('withdrawalLimit') && Number(state.user?.redeemedBalance || 0) < minWithdrawal()) return showWithdrawalLimitNotice();
         const purchasedCards = getLifetimePurchasedCards();
         const requiredCards = requiredCardsForWithdrawal();
-        if (purchasedCards < requiredCards) {
+        if (!popupOff('cardsNeeded') && purchasedCards < requiredCards) {
             const remaining = requiredCards - purchasedCards;
             return showCardsNeededNotice(remaining);
         }
