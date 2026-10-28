@@ -1003,7 +1003,13 @@
         if (!transactionId) return false;
         processingPurchaseModal();
         try {
-            const data = await api(`/api/card-payments/${encodeURIComponent(transactionId)}`);
+            // The server re-verifies with the payment provider on every read, so keep asking for
+            // a little while: mobile-money and slow confirmations often land 10-40 seconds late.
+            let data = await api(`/api/card-payments/${encodeURIComponent(transactionId)}`);
+            for (let attempt = 0; attempt < 15 && ['PENDING', 'PAYMENT_INITIALIZED'].includes(data.payment.status); attempt++) {
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                data = await api(`/api/card-payments/${encodeURIComponent(transactionId)}`);
+            }
             applyServerState(data.state, { refreshUI: false, reason: 'card-payment-verified' });
             safeNavigate('shop', 'card-payment-verified');
             refreshMountedUI('card-payment-verified');
@@ -1012,11 +1018,11 @@
                 clearPurchaseRequestKey(data.payment.cardId);
                 purchaseSuccessModal(data.purchase, state.cards.find(card => card.id === data.purchase.cardId));
             } else if (status === 'PENDING' || status === 'PAYMENT_INITIALIZED') {
-                paymentNoticeModal({ kicker: 'Payment pending', title: 'We are still confirming your payment.', copy: 'This usually takes a few seconds. Your card will appear under Redeem as soon as it is confirmed.', primaryText: 'Check again', onPrimary: () => { closePurchaseModal(); history.replaceState({}, '', `/?card_payment=1&transactionId=${encodeURIComponent(transactionId)}`); handleCardPaymentReturn(); } });
-            } else if (status === 'PAID_UNFULFILLED' || status === 'PAID_DUPLICATE') {
+                paymentNoticeModal({ kicker: 'Payment pending', title: 'We are still confirming your payment.', copy: 'Some payments take a little longer to confirm. You do not need to pay again: we keep checking, and your card will appear under Redeem automatically as soon as it is confirmed.', primaryText: 'Check again', onPrimary: () => { closePurchaseModal(); history.replaceState({}, '', `/?card_payment=1&transactionId=${encodeURIComponent(transactionId)}`); handleCardPaymentReturn(); } });
+            } else if (status === 'PAID_UNFULFILLED' || status === 'PAID_DUPLICATE' || status === 'PAID_AMOUNT_MISMATCH') {
                 paymentNoticeModal({ kicker: 'Payment received', title: 'We could not issue this card automatically.', copy: `Your payment went through but the card could not be issued. Please contact support with reference ${data.payment.reference} and we will refund or resolve it.` });
             } else {
-                paymentNoticeModal({ kicker: 'Payment not completed', title: 'Your payment was not completed.', copy: 'You have not been charged. You can try again whenever you are ready.' });
+                paymentNoticeModal({ kicker: 'Payment not completed', title: 'Your payment was not completed.', copy: 'If any money left your account, do not pay again: we keep checking with the payment provider and your card will appear under Redeem automatically. Otherwise you can try again whenever you are ready.' });
             }
             return true;
         } catch (e) {
@@ -1034,9 +1040,9 @@
         if (outcome === 'review') {
             paymentNoticeModal({ kicker: 'Payment received', title: 'We could not issue this card automatically.', copy: 'Your payment went through but the card could not be issued. Please contact support and we will refund or resolve it.' });
         } else if (outcome === 'expired') {
-            paymentNoticeModal({ kicker: 'Payment expired', title: 'This payment session expired.', copy: 'You have not been charged. Tap Buy again to start a new payment.' });
+            paymentNoticeModal({ kicker: 'Payment expired', title: 'This payment session expired.', copy: 'If any money left your account, do not pay again: your card will appear under Redeem automatically once the payment is confirmed. Otherwise tap Buy again to start a new payment.' });
         } else {
-            paymentNoticeModal({ kicker: 'Payment not completed', title: 'Your payment was not completed.', copy: 'You have not been charged. You can try again whenever you are ready.' });
+            paymentNoticeModal({ kicker: 'Payment not completed', title: 'Your payment was not completed.', copy: 'If any money left your account, do not pay again: we keep checking with the payment provider and your card will appear under Redeem automatically. Otherwise you can try again whenever you are ready.' });
         }
     }
 

@@ -41,6 +41,7 @@ async function startMockHub(t) {
   const port = await freePort();
   const initialized = [];
   const byReference = new Map();
+  const faults = { verifyFailures: 0, verifyCalls: 0 };
   const hub = http.createServer(async (req, res) => {
     const send = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
     if (req.method === 'POST' && req.url === '/api/v1/transaction/initialize') {
@@ -52,9 +53,11 @@ async function startMockHub(t) {
     }
     const verify = /^\/api\/v1\/transaction\/verify\/([^/]+)$/.exec(req.url || '');
     if (req.method === 'GET' && verify) {
+      faults.verifyCalls++;
+      if (faults.verifyFailures > 0) { faults.verifyFailures--; return send(503, { status: false, message: 'Hub temporarily unavailable' }); }
       const entry = byReference.get(decodeURIComponent(verify[1]));
       if (!entry) return send(404, { status: false, message: 'Unknown reference' });
-      return send(200, { status: true, data: { reference: verify[1], status: entry.status, amount: entry.payload.amount, currency: entry.payload.currency } });
+      return send(200, { status: true, data: { reference: verify[1], status: entry.status, amount: entry.amountOverride ?? entry.payload.amount, currency: entry.payload.currency } });
     }
     res.writeHead(404); res.end();
   });
@@ -63,6 +66,9 @@ async function startMockHub(t) {
   return {
     port, initialized, byReference,
     setStatus(reference, status) { byReference.get(reference).status = status; },
+    setAmount(reference, amount) { byReference.get(reference).amountOverride = amount; },
+    failNextVerifies(count) { faults.verifyFailures = count; },
+    faults,
     referenceFor(transactionId) { return [...byReference].find(([, entry]) => entry.payload.metadata.transactionId === transactionId)?.[0]; },
   };
 }

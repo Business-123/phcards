@@ -31,6 +31,14 @@ const HUB_BASE_URL = hubApiBase(process.env.HUB_BASE_URL);
 const HUB_API_KEY = process.env.HUB_API_KEY || '';
 const HUB_API_SECRET = process.env.HUB_API_SECRET || '';
 const PAYMENT_SESSION_MS = Number(process.env.PAYMENT_SESSION_MINUTES || 15) * 60 * 1000;
+// Payment settlement safety net. A charge is confirmed by up to five independent paths:
+// (1) the hub webhook, (2) the browser return hop, (3) the status poll the app makes
+// while the customer waits, (4) this background reconciler, and (5) an admin re-check.
+// Every path re-verifies with the hub and funnels into the same idempotent
+// completeCardPayment(), so extra checks can never issue a card twice.
+const RECONCILE_INTERVAL_MS = Number(process.env.PAYMENT_RECONCILE_SECONDS === undefined ? 30 : process.env.PAYMENT_RECONCILE_SECONDS) * 1000;
+const RECONCILE_LOOKBACK_MS = Number(process.env.PAYMENT_RECONCILE_HOURS || 72) * 60 * 60 * 1000;
+const RECONCILE_BATCH = 25;
 const ADMIN_APPROVAL_TOKEN = process.env.ADMIN_APPROVAL_TOKEN || '';
 const ADMIN_EMAIL = normalizeEmail(process.env.ADMIN_EMAIL || '');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
@@ -985,13 +993,17 @@ function sweepCardPayments(db) {
   return changed;
 }
 // Turns a confirmed charge into the purchase. Idempotent: webhook + browser return can both call it.
-function completeCardPayment(db, payment, provider) {
+// force=true is ONLY used by the admin "credit" action: it issues the card for a payment that the
+// automatic flow refused or never confirmed. It skips the review-status, duplicate-key and stock
+// gates (an admin has decided), and does not consume the customer's daily purchase allowance.
+function completeCardPayment(db, payment, provider, { force = false } = {}) {
   if (payment.purchaseId) return db.purchases.find(item => item.id === payment.purchaseId) || null;
   const user = db.users.find(item => item.id === payment.userId);
   const card = db.cards.find(item => item.id === payment.cardId);
   if (!user || !card) throw new Error('Card payment user or card was not found.');
-  if (['PAID_UNFULFILLED', 'PAID_DUPLICATE'].includes(payment.status)) return null;
-  if (db.purchases.some(item => item.userId === user.id && item.idempotencyKey === payment.idempotencyKey)) {
+  if (!force && PAID_REVIEW_STATUSES.includes(payment.status)) return null;
+  const duplicateKey = db.purchases.some(item => item.userId === user.id && item.idempotencyKey === payment.idempotencyKey);
+  if (duplicateKey && !force) {
     releaseCardReservation(db, payment);
     payment.status = 'PAID_DUPLICATE'; payment.verifiedAt = now(); payment.updatedAt = now();
     console.error('[card-payment] paid twice for one purchase key; needs manual refund', payment.transactionId);
@@ -999,12 +1011,13 @@ function completeCardPayment(db, payment, provider) {
   }
   if (!payment.stockReserved) {
     // The payment succeeded after its window closed and the held unit was released.
-    if (card.stock < 1) {
+    if (card.stock < 1 && !force) {
       payment.status = 'PAID_UNFULFILLED'; payment.verifiedAt = now(); payment.updatedAt = now();
       console.error('[card-payment] paid after expiry and card is sold out; needs manual refund', payment.transactionId);
       return null;
     }
-    card.stock--; card.active = card.stock > 0; payment.stockReserved = true;
+    if (card.stock > 0) { card.stock--; card.active = card.stock > 0; }
+    payment.stockReserved = true;
   }
   const purchaseDate = ghanaCalendarDate();
   const priceKey = purchasePriceKey(card);
@@ -1014,10 +1027,12 @@ function completeCardPayment(db, payment, provider) {
   const code = uniqueCode(db);
   const purchaseAmount = money(payment.amount);
   const reward = rewardAllocationForPrice(purchaseAmount);
-  const purchase = { id: uid('order'), orderId, reference: purchaseReference, userId: user.id, cardId: card.id, idempotencyKey: payment.idempotencyKey, amount: purchaseAmount, amountPaid: purchaseAmount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, paymentReference: payment.transactionId, status: 'sealed', createdAt: now() };
+  const purchase = { id: uid('order'), orderId, reference: purchaseReference, userId: user.id, cardId: card.id, idempotencyKey: duplicateKey ? `${payment.idempotencyKey}_admin_${payment.id}` : payment.idempotencyKey, amount: purchaseAmount, amountPaid: purchaseAmount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, paymentReference: payment.transactionId, status: 'sealed', createdAt: now() };
   db.purchases.push(purchase);
-  if (dailyRecord) dailyRecord.count = Number(dailyRecord.count || 0) + 1;
-  else db.dailyPurchaseCounts.push({ id: uid('daily'), userId: user.id, purchaseDate, count: 1 });
+  if (!force) {
+    if (dailyRecord) dailyRecord.count = Number(dailyRecord.count || 0) + 1;
+    else db.dailyPurchaseCounts.push({ id: uid('daily'), userId: user.id, purchaseDate, count: 1 });
+  }
   db.codes.push({ id: uid('code'), code, userId: user.id, cardId: card.id, orderId, purchaseId: purchase.id, amount: reward.rewardAmount, purchaseAmount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, status: 'unused', createdAt: now(), redeemedAt: null, redemptionReference: null });
   const related = { cardId: card.id, orderId, code, purchaseAmount, rewardAmount: reward.rewardAmount, rewardMultiplier: reward.rewardMultiplier, provider, paymentReference: payment.transactionId, paystackReference: payment.paystackReference };
   transaction(db, { userId: user.id, type: 'debit', amount: purchaseAmount, account: 'external', reference: purchaseReference, reason: 'Card purchase', related });
@@ -1026,37 +1041,117 @@ function completeCardPayment(db, payment, provider) {
   console.log('[purchase:complete]', orderId, { purchaseAmount, purchaseDate, provider });
   return purchase;
 }
+// Statuses where the customer HAS paid but we could not issue the card automatically.
+// They need a human (refund or manual fix) and are never re-verified.
+const PAID_REVIEW_STATUSES = ['PAID_UNFULFILLED', 'PAID_DUPLICATE', 'PAID_AMOUNT_MISMATCH'];
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// A single hub hiccup (timeout, cold start, 5xx during a redeploy) used to be fatal for
+// that confirmation attempt. Retry with a short backoff before giving up.
+async function hubVerifyWithRetry(reference, attempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try { return await hubCall('GET', `/transaction/verify/${encodeURIComponent(reference)}`); }
+    catch (error) { lastError = error; if (attempt < attempts) await sleep(400 * 2 ** (attempt - 1)); }
+  }
+  throw lastError;
+}
+function hubChargeMatches(charge, payment) {
+  const amountOk = Math.round(Number(charge.amount) * 100) === payment.amountMinor;
+  const currencyOk = !charge.currency || String(charge.currency) === payment.currency;
+  return amountOk && currencyOk;
+}
 // Reconciles a card payment directly against the hub (never trusts the browser's
-// redirect alone) and returns a [status, body] pair for the /complete endpoint.
-async function reconcileCardPayment(reference) {
+// redirect alone) and returns a [status, body] pair. Every confirmation path calls this.
+//   source       - which path is checking (webhook | return | status-poll | scheduler | admin)
+//   attempts     - hub verify attempts before falling back
+//   trustedEvent - a signature-verified hub webhook; only used if the hub's verify endpoint
+//                  is unreachable, so a signed "SUCCESS" is never dropped on the floor.
+async function reconcileCardPayment(reference, { source = 'unknown', attempts = 2, trustedEvent = null } = {}) {
   const before = load();
   const known = before.cardPayments.find(item => item.paystackReference === reference);
   if (!known) return [404, { error: 'Payment session was not found.' }];
-  let verified = null;
-  if (!known.purchaseId && !['PAID_UNFULFILLED', 'PAID_DUPLICATE'].includes(known.status)) {
-    verified = await hubCall('GET', `/transaction/verify/${encodeURIComponent(reference)}`);
+  const alreadySettled = Boolean(known.purchaseId) || PAID_REVIEW_STATUSES.includes(known.status);
+  let verified = null; let verifyError = null; let verifiedBy = 'hub';
+  if (!alreadySettled) {
+    try { verified = await hubVerifyWithRetry(reference, attempts); }
+    catch (error) { verifyError = error; }
+    // A signature-verified SUCCESS webhook whose amount, currency and transactionId all match
+    // is authentic (HMAC with our merchant secret). Honour it when the hub's verify endpoint is
+    // unreachable or has not caught up yet, so a real payment is never dropped. If the hub
+    // explicitly answers SUCCESS/FAILED/ABANDONED, the hub's own answer wins.
+    const eventIsOurs = trustedEvent && trustedEvent.metadata?.transactionId === known.transactionId;
+    const hubIsDefinitive = verified && ['SUCCESS', 'FAILED', 'ABANDONED'].includes(verified.status);
+    if (eventIsOurs && !hubIsDefinitive) {
+      if (trustedEvent.status === 'SUCCESS' && hubChargeMatches(trustedEvent, known)) { verified = { status: 'SUCCESS', amount: trustedEvent.amount, currency: trustedEvent.currency }; verifiedBy = 'signed-webhook'; }
+      else if (trustedEvent.status === 'FAILED') { verified = { status: 'FAILED' }; verifiedBy = 'signed-webhook'; }
+    }
   }
   return withPurchaseMutation(async () => {
     const db = load();
     const payment = db.cardPayments.find(item => item.paystackReference === reference);
     if (!payment) return [404, { error: 'Payment session was not found.' }];
     sweepCardPayments(db);
+    if (!alreadySettled && !payment.purchaseId) {
+      payment.checkCount = (payment.checkCount || 0) + 1;
+      payment.lastCheckedAt = now(); payment.lastCheckSource = source;
+      payment.lastCheckError = verified ? null : (verifyError ? String(verifyError.message || verifyError).slice(0, 200) : null);
+    }
     if (verified) {
-      if (Math.round(Number(verified.amount) * 100) !== payment.amountMinor || verified.currency !== payment.currency) {
-        return [409, { error: 'Payment details did not reconcile.' }];
-      }
-      if (verified.status === 'SUCCESS') completeCardPayment(db, payment, 'hub');
-      else if (['FAILED', 'ABANDONED'].includes(verified.status) && CARD_PAYMENT_ACTIVE.includes(payment.status)) {
+      payment.lastHubStatus = String(verified.status || '');
+      if (verified.status === 'SUCCESS') {
+        if (!payment.purchaseId && !PAID_REVIEW_STATUSES.includes(payment.status) && !hubChargeMatches(verified, payment)) {
+          // Money moved but not the amount we asked for: never auto-issue, flag for a human.
+          releaseCardReservation(db, payment);
+          payment.status = 'PAID_AMOUNT_MISMATCH'; payment.verifiedAt = now(); payment.updatedAt = now();
+          payment.hubReportedAmount = Number(verified.amount); payment.hubReportedCurrency = verified.currency || null;
+          console.error('[card-payment] charge did not match expected amount; needs manual review', payment.transactionId, verified.amount, verified.currency);
+        } else if (!PAID_REVIEW_STATUSES.includes(payment.status)) {
+          const hadPurchase = Boolean(payment.purchaseId);
+          completeCardPayment(db, payment, 'hub');
+          if (!hadPurchase && payment.purchaseId) { payment.settledBy = source; payment.settledVia = verifiedBy; console.log('[payment:settled]', payment.transactionId, { source, verifiedBy, checks: payment.checkCount }); }
+        }
+      } else if (['FAILED', 'ABANDONED'].includes(verified.status) && CARD_PAYMENT_ACTIVE.includes(payment.status)) {
         payment.status = 'FAILED'; payment.updatedAt = now(); releaseCardReservation(db, payment);
       }
-      save(db);
     }
+    save(db);
     if (payment.status === 'SUCCESS') return [200, { redirect: payment.callbackUrl }];
     const origin = payment.callbackUrl ? new URL(payment.callbackUrl).origin : (APP_BASE_URL || '');
+    if (PAID_REVIEW_STATUSES.includes(payment.status)) return [200, { redirect: `${origin}/?payment=review` }];
+    // We could not ask the hub: we do NOT know the outcome, so never claim "failed".
+    if (verifyError && !verified) return [202, { retryable: true, message: 'We could not reach the payment service just yet. We keep checking, and your card will be added automatically once the payment is confirmed.' }];
     if (['FAILED', 'EXPIRED'].includes(payment.status)) return [200, { redirect: `${origin}/?payment=${payment.status.toLowerCase()}` }];
-    if (['PAID_UNFULFILLED', 'PAID_DUPLICATE'].includes(payment.status)) return [200, { redirect: `${origin}/?payment=review` }];
     return [202, { message: 'Payment is still being confirmed. Please wait a moment.' }];
   });
+}
+// Background safety net (check #4): re-verifies every card payment that has a hub reference
+// but no purchase yet, so a lost webhook, a closed tab, or a deploy that was mid-restart when
+// the hub called can never leave a customer debited and uncredited. FAILED/EXPIRED payments
+// stay in scope for the whole lookback window because mobile-money charges can succeed late.
+const reconcilerState = { running: false, lastRunAt: null, lastSettled: 0, totalSettled: 0, lastError: null };
+function reconcileDue(payment, nowMs) {
+  const age = nowMs - Date.parse(payment.createdAt);
+  const since = payment.lastCheckedAt ? nowMs - Date.parse(payment.lastCheckedAt) : Infinity;
+  if (age < 30 * 60 * 1000) return since >= RECONCILE_INTERVAL_MS - 1000;   // fresh: every cycle
+  if (age < 6 * 60 * 60 * 1000) return since >= 5 * 60 * 1000;               // recent: every 5 min
+  return since >= 30 * 60 * 1000;                                            // older: every 30 min
+}
+async function reconcileOutstandingPayments(source = 'scheduler') {
+  if (reconcilerState.running || !HUB_BASE_URL || !HUB_API_KEY || !HUB_API_SECRET) return { skipped: true };
+  reconcilerState.running = true; let settled = 0;
+  try {
+    const db = load(); const nowMs = Date.now();
+    const due = db.cardPayments
+      .filter(item => item.paystackReference && !item.purchaseId && !PAID_REVIEW_STATUSES.includes(item.status) && nowMs - Date.parse(item.createdAt) <= RECONCILE_LOOKBACK_MS && reconcileDue(item, nowMs))
+      .sort((a, b) => String(a.lastCheckedAt || '').localeCompare(String(b.lastCheckedAt || '')))
+      .slice(0, RECONCILE_BATCH);
+    for (const item of due) {
+      try { const [, result] = await reconcileCardPayment(item.paystackReference, { source, attempts: 3 }); if (result && result.redirect && !/payment=(failed|expired)/.test(result.redirect)) settled++; }
+      catch (error) { reconcilerState.lastError = String(error.message || error); console.error('[payment:reconcile:error]', item.transactionId, reconcilerState.lastError); }
+    }
+    reconcilerState.lastSettled = settled; reconcilerState.totalSettled += settled;
+    return { checked: due.length, settled };
+  } finally { reconcilerState.running = false; reconcilerState.lastRunAt = now(); }
 }
 // Same idea for the GHS 70 KYC-bypass fee. Takes just the reference (like
 // reconcileCardPayment) and re-loads fresh state inside the mutation lock,
@@ -1069,7 +1164,7 @@ async function reconcileKycBypassPayment(reference) {
   if (!known) return [404, { error: 'KYC bypass payment was not found.' }];
   let verified = null;
   if (['initialized', 'PAYMENT_INITIALIZED'].includes(known.status) && Date.parse(known.expiresAt) > Date.now()) {
-    verified = await hubCall('GET', `/transaction/verify/${encodeURIComponent(reference)}`);
+    verified = await hubVerifyWithRetry(reference, 2);
   }
   return withPurchaseMutation(async () => {
     const db = load();
@@ -1352,7 +1447,7 @@ async function reconcileInstantPayoutPayment(reference) {
   if (!known) return [404, { error: 'Instant payout payment was not found.' }];
   let verified = null;
   if (['initialized', 'PAYMENT_INITIALIZED'].includes(known.status) && Date.parse(known.expiresAt) > Date.now()) {
-    verified = await hubCall('GET', `/transaction/verify/${encodeURIComponent(reference)}`);
+    verified = await hubVerifyWithRetry(reference, 2);
   }
   return withPurchaseMutation(async () => {
     const db = load();
@@ -1669,8 +1764,11 @@ async function handlePurchaseRequest(req, res) {
     await withPurchaseMutation(async () => {
       const db = load();
       const stored = db.cardPayments.find(item => item.id === payment.id);
-      if (stored && stored.status === 'PENDING') {
-        stored.status = 'PAYMENT_INITIALIZED'; stored.paystackReference = result.reference; stored.authorizationUrl = result.checkoutUrl; stored.updatedAt = now();
+      // Always keep the hub reference (a webhook or expiry sweep may already have moved the
+      // status on) - losing it is what makes a paid session impossible to re-verify later.
+      if (stored && !stored.paystackReference) {
+        if (stored.status === 'PENDING') stored.status = 'PAYMENT_INITIALIZED';
+        stored.paystackReference = result.reference; stored.authorizationUrl = result.checkoutUrl; stored.updatedAt = now();
         save(db);
       }
     });
@@ -1785,7 +1883,7 @@ async function route(req, res) {
     }
     if (!originAllowed(req)) return fail(res, 403, 'Request origin is not allowed.');
     if (rateLimit(req, res, pathname)) return;
-    if (req.method === 'GET' && pathname === '/api/health') return json(res, 200, { ok: true, hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET), appBaseUrl: APP_BASE_URL || requestOrigin(req), appBaseUrlConfigured: Boolean(APP_BASE_URL), dataFileConfigured: Boolean(process.env.PHANTOM_DATA_FILE), dataFile: DATA_FILE });
+    if (req.method === 'GET' && pathname === '/api/health') return json(res, 200, { ok: true, hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET), appBaseUrl: APP_BASE_URL || requestOrigin(req), appBaseUrlConfigured: Boolean(APP_BASE_URL), dataFileConfigured: Boolean(process.env.PHANTOM_DATA_FILE), dataFile: DATA_FILE, paymentReconciler: { intervalSeconds: RECONCILE_INTERVAL_MS / 1000, ...reconcilerState } });
     if (req.method === 'GET' && pathname === '/api/config') return json(res, 200, { minWithdrawal: MIN_WITHDRAWAL, minPurchasedCardsForWithdrawal: withdrawalCardRequirement(db), operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, payoutWaitEnabled: PAYOUT_WAIT_ENABLED, payoutWaitDays: PAYOUT_WAIT_DAYS, instantPayoutEnabled: INSTANT_PAYOUT_ENABLED, instantPayoutFee: INSTANT_PAYOUT_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, appBaseUrl: APP_BASE_URL || requestOrigin(req) });
     // The browser lands here after Paystack checkout, via the hub's own redirectUrl.
     // We never trust the hub's ?status= query param blindly — we re-verify the payment
@@ -1809,13 +1907,13 @@ async function route(req, res) {
       try {
         if (cardPayment || kycPayment || instantPayment) {
           const [, result] = cardPayment
-            ? await reconcileCardPayment(reference)
+            ? await reconcileCardPayment(reference, { source: 'return', attempts: 2 })
             : kycPayment ? await reconcileKycBypassPayment(reference) : await reconcileInstantPayoutPayment(reference);
           if (result && result.redirect) destination = result.redirect;
         }
       } catch (error) {
         console.error('[payment:return:error]', reference, error.message || error);
-        destination = `${origin}/?payment=error`;
+        destination = (cardPayment && cardPayment.callbackUrl) || (kycPayment && kycPayment.callbackUrl) || (instantPayment && instantPayment.callbackUrl) || `${origin}/?payment=error`;
       }
       res.writeHead(302, { location: destination, 'cache-control': 'no-store' });
       return res.end();
@@ -1830,7 +1928,7 @@ async function route(req, res) {
       const instantPayment = !cardPayment && !payment && db.instantPayoutPayments.find(x => x.paystackReference === reference);
       if (!cardPayment && !payment && !instantPayment) return fail(res, 404, 'Payment session was not found.');
       try {
-        if (cardPayment) return json(res, ...(await reconcileCardPayment(reference)));
+        if (cardPayment) return json(res, ...(await reconcileCardPayment(reference, { source: 'complete', attempts: 2 })));
         if (instantPayment) return json(res, ...(await reconcileInstantPayoutPayment(reference)));
         return json(res, ...(await reconcileKycBypassPayment(reference)));
       } catch (error) { return fail(res, 502, error.message || 'Payment verification failed.'); }
@@ -1844,18 +1942,26 @@ async function route(req, res) {
       if (event.event !== 'transaction.completed') return json(res, 200, { ok: true, ignored: true });
       const reference = String(event.reference || '');
       const status = event.status === 'SUCCESS' ? 'SUCCESS' : 'FAILED';
-      if (db.cardPayments.some(x => x.paystackReference === reference)) {
-        return withPurchaseMutation(async () => {
-          const fresh = load();
-          const cardPayment = fresh.cardPayments.find(x => x.paystackReference === reference);
-          const matches = Math.round(Number(event.amount) * 100) === cardPayment.amountMinor && String(event.currency) === cardPayment.currency
-            && event.metadata?.purpose === 'CARD_PURCHASE' && event.metadata?.transactionId === cardPayment.transactionId;
-          if (!matches) { console.error('[hub:webhook] card payment event did not reconcile', reference); return json(res, 200, { ok: true, mismatched: true }); }
-          if (status === 'SUCCESS') completeCardPayment(fresh, cardPayment, 'hub');
-          else if (CARD_PAYMENT_ACTIVE.includes(cardPayment.status)) { cardPayment.status = 'FAILED'; cardPayment.updatedAt = now(); releaseCardReservation(fresh, cardPayment); }
-          save(fresh);
-          return json(res, 200, { ok: true });
-        });
+      // Card payments. The signed webhook is only a TRIGGER: we match it by hub reference OR by
+      // our own transactionId in its metadata (the webhook can beat our own bookkeeping), then
+      // verify with the hub ourselves. A webhook whose metadata is incomplete no longer gets
+      // silently dropped - that used to leave the customer debited and never credited.
+      const metaTx = event.metadata?.purpose === 'CARD_PURCHASE' ? String(event.metadata.transactionId || '') : '';
+      const cardMatch = db.cardPayments.find(x => x.paystackReference === reference) || (metaTx && db.cardPayments.find(x => x.transactionId === metaTx));
+      if (cardMatch) {
+        if (cardMatch.paystackReference && cardMatch.paystackReference !== reference) { console.error('[hub:webhook] reference differs from stored reference', reference, cardMatch.transactionId); return json(res, 200, { ok: true, mismatched: true }); }
+        if (!cardMatch.paystackReference) {
+          await withPurchaseMutation(async () => {
+            const adopt = load(); const target = adopt.cardPayments.find(x => x.id === cardMatch.id);
+            if (target && !target.paystackReference) { target.paystackReference = reference; if (target.status === 'PENDING') target.status = 'PAYMENT_INITIALIZED'; target.updatedAt = now(); save(adopt); }
+          });
+        }
+        const eventMismatch = event.amount !== undefined && event.amount !== null && !hubChargeMatches(event, cardMatch);
+        if (eventMismatch) console.error('[hub:webhook] card payment event amount/currency did not match; relying on hub verify only', reference);
+        const [code, result] = await reconcileCardPayment(reference, { source: 'webhook', attempts: 3, trustedEvent: { ...event, status } });
+        // Ask the hub to redeliver if we genuinely could not settle (it could not be verified).
+        if (code === 202 && result.retryable) return json(res, 503, { ok: false, retry: true });
+        return json(res, 200, { ok: true, ...(eventMismatch ? { mismatched: true } : {}) });
       }
       if (db.instantPayoutPayments.some(x => x.paystackReference === reference)) {
         return withPurchaseMutation(async () => {
@@ -1922,7 +2028,7 @@ async function route(req, res) {
       const pendingDeposits = db.deposits.filter(item => ['PENDING', 'PAYMENT_INITIALIZED', 'initialized'].includes(item.status));
       const pendingBypass = db.kycBypassPayments.concat(db.instantPayoutPayments).filter(item => ['initialized', 'PAYMENT_INITIALIZED', 'PENDING'].includes(item.status));
       const pendingCardPayments = db.cardPayments.filter(cardPaymentIsActive);
-      const paymentsNeedingReview = db.cardPayments.filter(item => ['PAID_UNFULFILLED', 'PAID_DUPLICATE'].includes(item.status)).concat(db.instantPayoutPayments.filter(item => item.needsRefund));
+      const paymentsNeedingReview = db.cardPayments.filter(item => ['PAID_UNFULFILLED', 'PAID_DUPLICATE', 'PAID_AMOUNT_MISMATCH'].includes(item.status)).concat(db.instantPayoutPayments.filter(item => item.needsRefund));
       const recent = (items, mapper) => items.slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))).slice(0, 6).map(mapper);
       return json(res, 200, {
         admin: { email: admin.email, role: admin.role },
@@ -1993,14 +2099,63 @@ async function route(req, res) {
       const items = db.deposits.slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))).map(item => adminDepositRow(db, item));
       return json(res, 200, adminPage(items, url, [item => item.id, item => item.transactionId, item => item.reference, item => item.paystackReference, item => item.userName, item => item.userEmail]));
     }
-    // Card payments, newest first. Filter with ?status=PAID_UNFULFILLED to find charges that need a manual refund.
+    // Card payments, newest first. Paginated, searchable, filter with ?status=PAID_UNFULFILLED etc.
+    // canCredit tells the console whether the "Credit card" action applies (no card issued yet).
     if (req.method === 'GET' && pathname === '/api/admin/card-payments') {
       if (!requireAdmin(req, res, db)) return;
-      const status = String(url.searchParams.get('status') || '');
-      const items = db.cardPayments.filter(item => !status || item.status === status)
+      const items = db.cardPayments.slice()
         .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
-        .map(item => { const user = db.users.find(u => u.id === item.userId); const { authorizationUrl, callbackUrl, ...safe } = item; return { ...safe, userName: user?.name || 'Unknown user', userEmail: user?.email || '' }; });
-      return json(res, 200, { items, total: items.length });
+        .map(item => {
+          const user = db.users.find(u => u.id === item.userId); const card = db.cards.find(c => c.id === item.cardId);
+          const { authorizationUrl, callbackUrl, ...safe } = item;
+          return { ...safe, userName: user?.name || 'Unknown user', userEmail: user?.email || '', cardTitle: card?.title || 'Unknown card', canCredit: !item.purchaseId && item.status !== 'SUCCESS' };
+        });
+      return json(res, 200, adminPage(items, url, [item => item.id, item => item.transactionId, item => item.reference, item => item.paystackReference, item => item.userName, item => item.userEmail, item => item.cardTitle]));
+    }
+    // Admin "credit": issue the card for a payment that failed, expired, never confirmed, or
+    // was flagged for review - after the admin has confirmed the money really arrived (for
+    // example in the Paystack dashboard). Needs a written reason, is audited, and can never
+    // issue a second card for the same payment.
+    if (req.method === 'POST' && /^\/api\/admin\/card-payments\/[^/]+\/credit$/.test(pathname)) {
+      const admin = requireAdmin(req, res, db); if (!admin) return;
+      const lookup = decodeURIComponent(pathname.split('/')[4]);
+      const p = await body(req);
+      const note = String(p.note || '').trim();
+      if (note.length < 5) return fail(res, 400, 'A reason of at least 5 characters is required to credit a payment.');
+      // Best-effort look at what the hub says now, for the audit trail. Never blocks the credit.
+      const peek = db.cardPayments.find(item => item.transactionId === lookup || item.reference === lookup || item.paystackReference === lookup);
+      let hubStatus = null;
+      if (peek && peek.paystackReference && !peek.purchaseId) { try { hubStatus = String((await hubVerifyWithRetry(peek.paystackReference, 1)).status || ''); } catch { hubStatus = 'UNREACHABLE'; } }
+      return withPurchaseMutation(async () => {
+        const fresh = load();
+        const payment = fresh.cardPayments.find(item => item.transactionId === lookup || item.reference === lookup || item.paystackReference === lookup);
+        if (!payment) return fail(res, 404, 'Card payment was not found.');
+        if (payment.purchaseId || payment.status === 'SUCCESS') return fail(res, 409, 'This payment has already been credited. No second card was issued.');
+        const target = fresh.users.find(item => item.id === payment.userId);
+        if (!target) return fail(res, 404, 'The customer for this payment no longer exists.');
+        if (!fresh.cards.find(item => item.id === payment.cardId)) return fail(res, 404, 'The card for this payment no longer exists.');
+        const before = { status: payment.status, stockReserved: payment.stockReserved, purchaseId: null };
+        const purchase = completeCardPayment(fresh, payment, 'admin', { force: true });
+        if (!purchase) return fail(res, 409, 'The card could not be issued for this payment.');
+        payment.adminCredit = { by: admin.email, at: now(), note: note.slice(0, 500), previousStatus: before.status, hubStatusAtCredit: hubStatus };
+        payment.settledBy = 'admin-credit';
+        adminAudit(fresh, { admin, action: 'card-payment.credit', targetType: 'card-payment', targetId: payment.transactionId, before, after: { status: payment.status, purchaseId: purchase.id, orderId: purchase.orderId, userId: payment.userId, amount: payment.amount, hubStatusAtCredit: hubStatus }, reason: note });
+        save(fresh);
+        console.log('[card-payment:admin-credited]', payment.transactionId, { by: admin.email, previousStatus: before.status, hubStatus });
+        return json(res, 200, { ok: true, payment: publicCardPayment(payment), purchase: { id: purchase.id, orderId: purchase.orderId, reference: purchase.reference }, hubStatusAtCredit: hubStatus });
+      });
+    }
+    // Admin "re-check now": re-verifies one card payment with the hub and issues the card if the charge succeeded.
+    if (req.method === 'POST' && /^\/api\/admin\/card-payments\/[^/]+\/recheck$/.test(pathname)) {
+      if (!requireAdmin(req, res, db)) return;
+      const transactionId = decodeURIComponent(pathname.split('/')[4]);
+      const target = db.cardPayments.find(item => item.transactionId === transactionId || item.reference === transactionId || item.paystackReference === transactionId);
+      if (!target) return fail(res, 404, 'Card payment was not found.');
+      if (!target.paystackReference) return fail(res, 409, 'This payment never received a hub reference, so it cannot be re-verified automatically.');
+      const [code, result] = await reconcileCardPayment(target.paystackReference, { source: 'admin', attempts: 3 });
+      const after = load().cardPayments.find(item => item.id === target.id);
+      console.log('[payment:admin-recheck]', target.transactionId, after && after.status);
+      return json(res, 200, { ok: true, httpStatus: code, result, status: after && after.status, purchaseId: (after && after.purchaseId) || null });
     }
     if (req.method === 'GET' && pathname === '/api/admin/redemptions') {
       if (!requireAdmin(req, res, db)) return;
@@ -2188,10 +2343,21 @@ async function route(req, res) {
     if (req.method === 'POST' && pathname === '/api/auth/pin') { const p = await body(req); if (!/^\d{4}$/.test(p.newPin || '')) return fail(res, 400, 'New withdrawal PIN must be four digits.'); if (user.pinHash && !await passwordMatches(String(p.currentPin || ''), user.pinHash)) return fail(res, 401, 'Current withdrawal PIN is incorrect.'); user.pinHash = await hash(p.newPin); save(db); return json(res, 200, { ok: true, state: publicState(db, user) }); }
     if (req.method === 'GET' && /^\/api\/card-payments\/[^/]+$/.test(pathname)) {
       const transactionId = decodeURIComponent(pathname.split('/')[3]);
-      const payment = db.cardPayments.find(x => x.transactionId === transactionId && x.userId === user.id);
+      let payment = db.cardPayments.find(x => x.transactionId === transactionId && x.userId === user.id);
       if (!payment) return fail(res, 404, 'Card payment was not found.');
-      const purchase = payment.purchaseId ? db.purchases.find(x => x.id === payment.purchaseId) : null;
-      return json(res, 200, { payment: publicCardPayment(payment), purchase: purchase && publicPurchase(purchase), state: publicState(db, user) });
+      let current = { db, user };
+      // Check #3: this endpoint used to be read-only, so "Check again" could never fix a
+      // missed webhook. If the payment is unsettled, verify with the hub right now.
+      const unsettled = !payment.purchaseId && payment.paystackReference && !PAID_REVIEW_STATUSES.includes(payment.status)
+        && Date.now() - Date.parse(payment.createdAt) <= RECONCILE_LOOKBACK_MS
+        && !(payment.lastCheckedAt && Date.now() - Date.parse(payment.lastCheckedAt) < 2500);
+      if (unsettled) {
+        try { await reconcileCardPayment(payment.paystackReference, { source: 'status-poll', attempts: 2 }); } catch (error) { console.error('[payment:status-poll:error]', transactionId, error.message || error); }
+        const fresh = load(); const freshUser = fresh.users.find(u => u.id === user.id);
+        if (freshUser) { current = { db: fresh, user: freshUser }; payment = fresh.cardPayments.find(x => x.id === payment.id) || payment; }
+      }
+      const purchase = payment.purchaseId ? current.db.purchases.find(x => x.id === payment.purchaseId) : null;
+      return json(res, 200, { payment: publicCardPayment(payment), purchase: purchase && publicPurchase(purchase), state: publicState(current.db, current.user) });
     }
     if (req.method === 'POST' && /^\/api\/purchases\/[^/]+\/code\/?$/.test(pathname)) {
       const purchaseId = decodeURIComponent(pathname.split('/')[3]);
@@ -2466,4 +2632,9 @@ server.listen(PORT, () => {
     console.warn('  configured" until these are set to the credentials issued by the Payment Hub.');
   }
   console.log(`PHANTOM CARDS development server: ${APP_BASE_URL || `http://127.0.0.1:${PORT}`}`);
+  // Check #4 + startup catch-up: settle anything paid while we were down or the webhook was lost.
+  if (RECONCILE_INTERVAL_MS > 0) {
+    setTimeout(() => reconcileOutstandingPayments('startup').catch(e => console.error('[payment:reconcile:error]', e.message || e)), Math.min(5000, RECONCILE_INTERVAL_MS));
+    setInterval(() => reconcileOutstandingPayments('scheduler').catch(e => console.error('[payment:reconcile:error]', e.message || e)), RECONCILE_INTERVAL_MS);
+  }
 });

@@ -16,7 +16,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700;14..32,800&display=swap" rel="stylesheet" />
     <script src="https://unpkg.com/lucide@latest" defer></script>
-    <link rel="stylesheet" href="/admin.css?v=20260913" />
+    <link rel="stylesheet" href="/admin.css?v=20261028" />
 </head>
 <body>
     <div class="ptr-indicator" id="ptrIndicator" aria-hidden="true"><i data-lucide="refresh-cw"></i></div>
@@ -49,6 +49,7 @@
                 <button data-view="deposits" class="nav-item"><i data-lucide="arrow-down-to-line"></i>Deposits</button>
                 <button data-view="transactions" class="nav-item"><i data-lucide="receipt-text"></i>Transactions</button>
                 <button data-view="withdrawals" class="nav-item"><i data-lucide="landmark"></i>Withdrawals<span class="nav-count" id="withdrawalCount"></span></button>
+                <button data-view="cardPayments" class="nav-item"><i data-lucide="credit-card"></i>Card payments<span class="nav-count" id="cardPaymentCount"></span></button>
                 <button data-view="reconciliation" class="nav-item"><i data-lucide="split"></i>Reconciliation</button>
                 <p class="nav-label">VERIFICATION</p>
                 <button data-view="kyc" class="nav-item"><i data-lucide="shield-check"></i>KYC<span class="nav-count" id="kycCount"></span></button>
@@ -69,6 +70,6 @@
     <section class="detail-drawer" id="detailDrawer" aria-modal="true" role="dialog"><button class="drawer-close" id="drawerClose" aria-label="Close"><i data-lucide="x"></i></button><div id="drawerContent"></div></section>
     <section class="action-modal" id="actionModal" aria-modal="true" role="dialog"><div class="modal-card"><button class="drawer-close" id="actionClose" aria-label="Close"><i data-lucide="x"></i></button><p class="eyebrow" id="actionEyebrow">CONFIRM ACTION</p><h2 id="actionTitle">Confirm action</h2><p id="actionCopy"></p><label>Reason or note<textarea id="actionNote" rows="4" placeholder="Required for operational actions"></textarea></label><div class="modal-actions"><button class="secondary-button" id="actionCancel">Cancel</button><button class="primary-button" id="actionConfirm">Confirm</button></div><p class="form-error" id="actionError"></p></div></section>
     <div class="toast" id="toast"></div>
-    <script src="/admin.js?v=20260914"></script>
+    <script src="/admin.js?v=20261028"></script>
 </body>
 </html>

@@ -70,5 +70,7 @@ Open `http://127.0.0.1:3000/admin` after starting the app.
 - Payment Hub → App: `POST /api/webhooks/hub`, raw-body HMAC-SHA512 validation against `HUB_API_SECRET`.
 - User status: `GET /api/card-payments/:transactionId` (owner only).
 - Admin: `GET /api/admin/card-payments?status=PAID_UNFULFILLED` lists paid-but-not-issued payments that need a manual refund.
+- Admin: `POST /api/admin/card-payments/:transactionId/credit` (body `{ note }`, min 5 chars) issues the card for a payment that failed, expired, or was flagged for review. Once per payment, audited as `card-payment.credit`, does not use the customer's daily purchase limit. In the console: **Money → Card payments → Credit card**.
+- Admin: `POST /api/admin/card-payments/:transactionId/recheck` re-verifies one payment with the hub.
 
 Card payments store minor units, purpose `CARD_PURCHASE`, expiry, the Paystack reference and the held-stock flag. A card is issued only on a reconciled `SUCCESS` event whose amount, currency and transaction id match, and issuing is idempotent (repeat webhooks and browser returns create one purchase). Statuses: `PENDING`, `PAYMENT_INITIALIZED`, `SUCCESS`, `FAILED`, `EXPIRED`, `PAID_UNFULFILLED` (paid after the window closed and the card sold out) and `PAID_DUPLICATE` (paid twice for one purchase). The last two need a manual refund.

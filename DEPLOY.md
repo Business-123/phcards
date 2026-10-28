@@ -40,6 +40,8 @@ HUB_BASE_URL=https://<your-payment-hub>.up.railway.app   # the /api/v1 suffix is
 HUB_API_KEY=<issued by the Payment Hub for this merchant>
 HUB_API_SECRET=<issued by the Payment Hub for this merchant>
 PAYMENT_SESSION_MINUTES=15
+PAYMENT_RECONCILE_SECONDS=30    # background re-check of unsettled payments (0 disables)
+PAYMENT_RECONCILE_HOURS=72      # how far back unsettled payments keep being re-checked
 PHANTOM_DATA_FILE=/data/phantom-cards.json     # see "Persistent storage" below
 NODE_ENV=production
 ADMIN_EMAIL=<your admin login email>
@@ -89,3 +91,19 @@ you push a change.
 
 Once connected, every `git push` to the branch Railway is watching
 redeploys the service automatically.
+
+## Payment confirmation safety net
+
+A paid card is confirmed by five independent checks, all verifying with the hub and
+all funnelling into one idempotent function (a card can never be issued twice):
+
+1. Hub webhook (retried by the hub if we answer 503 because we could not verify).
+2. Browser return hop after Paystack checkout.
+3. Status poll: `GET /api/card-payments/:id` re-verifies with the hub; the app polls it for ~45s.
+4. Background reconciler every `PAYMENT_RECONCILE_SECONDS`, plus a catch-up run 5s after every boot/deploy.
+5. Admin re-check: `POST /api/admin/card-payments/:transactionId/recheck`.
+
+Watch `GET /api/health` (`paymentReconciler`) and filter the admin card-payments list by
+`PAID_UNFULFILLED`, `PAID_DUPLICATE` or `PAID_AMOUNT_MISMATCH`: those customers paid but need a manual refund or fix.
+
+6. Admin credit (manual): **Admin → Card payments → Credit card**. Use only after confirming in the Paystack dashboard that the money arrived; it needs a written reason and is recorded in Audit Logs.
