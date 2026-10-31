@@ -4813,49 +4813,6 @@
         .kyc-refund-note { margin-top: 12px; padding: 10px 12px; border: 1px solid #E8E0D2; border-radius: var(--radius-md); background: #FFF9EE; color: var(--text-secondary); font-size: .75rem; line-height: 1.45; }
         .kyc-time-tag { padding: 4px 7px; border-radius: 999px; background: #FFF0CC; color: #93620B; font-size: .63rem; font-weight: 800; white-space: nowrap; }
         .kyc-time-tag.instant { background: #EAF4E9; color: #4D7B52; }
-
-        /* ---- Pending payout period: big live countdown + prominent instant payout ---- */
-        .payout-hold-wrap { grid-column: 1 / -1; }
-        .payout-hold {
-            margin-top: 14px; padding: 16px; border-radius: 18px; color: #FFF8E8;
-            background: linear-gradient(160deg, #2A241C 0%, #1E1B18 100%);
-            border: 1px solid #3A3226; box-shadow: 0 10px 24px rgba(68, 52, 30, .16);
-        }
-        .payout-hold-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
-        .payout-hold-label { display: inline-flex; align-items: center; gap: 8px; font-size: .72rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: #F2C14E; }
-        .payout-hold-dot { width: 8px; height: 8px; border-radius: 50%; background: #F2C14E; box-shadow: 0 0 0 0 rgba(242,193,78,.6); animation: payoutPulse 1.8s infinite; }
-        .payout-hold-date { font-size: .72rem; color: #B9AE9B; }
-        .payout-clock { display: flex; align-items: stretch; justify-content: center; gap: 6px; margin-top: 14px; }
-        .payout-clock > i { align-self: center; font-style: normal; font-size: 1.4rem; font-weight: 800; color: #6E6454; padding-bottom: 16px; }
-        .payout-tile { flex: 1 1 0; min-width: 0; max-width: 92px; padding: 12px 4px 9px; border-radius: 14px; text-align: center; background: rgba(255, 248, 232, .07); border: 1px solid rgba(242, 193, 78, .22); }
-        .payout-tile strong { display: block; font-size: clamp(1.7rem, 9vw, 2.4rem); line-height: 1; font-weight: 800; letter-spacing: -.03em; color: #FFD66B; font-variant-numeric: tabular-nums; }
-        .payout-tile span { display: block; margin-top: 7px; font-size: .62rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: #B9AE9B; }
-        .payout-bar { height: 8px; margin-top: 16px; border-radius: 999px; background: rgba(255, 248, 232, .12); overflow: hidden; }
-        .payout-bar > span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #DFA51A, #FFD66B); transition: width 1s linear; }
-        .payout-bar-note { display: flex; justify-content: space-between; margin-top: 6px; font-size: .64rem; color: #9A8F7C; }
-        .payout-instant {
-            display: flex; align-items: center; gap: 12px; width: 100%; margin-top: 16px; padding: 14px 16px; min-height: 64px;
-            border: 0; border-radius: 16px; cursor: pointer; text-align: left; font-family: inherit;
-            color: #1E1B18; background: linear-gradient(135deg, #FFD66B 0%, #DFA51A 100%);
-            box-shadow: 0 10px 26px rgba(223, 165, 26, .38), inset 0 1px 0 rgba(255,255,255,.45);
-            animation: payoutGlow 2.4s ease-in-out infinite; transition: transform .15s ease;
-        }
-        .payout-instant:hover { transform: translateY(-1px); }
-        .payout-instant:active { transform: scale(.98); }
-        .payout-instant:focus-visible { outline: 3px solid #FFF8E8; outline-offset: 2px; }
-        .payout-instant-bolt { flex: 0 0 auto; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: #1E1B18; color: #FFD66B; font-size: 1.25rem; }
-        .payout-instant-text { flex: 1 1 auto; min-width: 0; display: grid; gap: 2px; }
-        .payout-instant-text strong { font-size: 1.08rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.15; }
-        .payout-instant-text small { font-size: .74rem; font-weight: 600; color: rgba(30, 27, 24, .72); }
-        .payout-instant-fee { flex: 0 0 auto; padding: 8px 12px; border-radius: 999px; background: #1E1B18; color: #FFD66B; font-size: .95rem; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
-        .payout-hold-paid { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: #F2FBF6; border: 1px solid rgba(76,175,132,.35); border-left: 4px solid #4CAF84; box-shadow: none; color: #1E1B18; }
-        .payout-hold-paid strong { display: block; font-size: .9rem; color: #287653; }
-        .payout-hold-paid span:not(.payout-hold-bolt) { font-size: .78rem; color: var(--text-secondary); }
-        .payout-hold-bolt { font-size: 1.3rem; }
-        @keyframes payoutPulse { 70% { box-shadow: 0 0 0 8px rgba(242,193,78,0); } 100% { box-shadow: 0 0 0 0 rgba(242,193,78,0); } }
-        @keyframes payoutGlow { 0%,100% { box-shadow: 0 10px 26px rgba(223,165,26,.34), inset 0 1px 0 rgba(255,255,255,.45); } 50% { box-shadow: 0 12px 34px rgba(223,165,26,.62), inset 0 1px 0 rgba(255,255,255,.45); } }
-        @media (prefers-reduced-motion: reduce) { .payout-instant, .payout-hold-dot { animation: none; } .payout-bar > span { transition: none; } }
-        @media (max-width: 359px) { .payout-hold { padding: 13px; } .payout-instant { gap: 9px; padding: 12px; } .payout-instant-text strong { font-size: .98rem; } .payout-instant-fee { padding: 7px 9px; font-size: .85rem; } }
         .kyc-upload-card { padding: 16px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-surface); }
         .kyc-upload-card h2 { font-size: 1rem; }
         .kyc-upload-card > p { margin: 6px 0 16px; color: var(--text-secondary); font-size: .8rem; line-height: 1.5; }

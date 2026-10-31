@@ -1664,79 +1664,6 @@
         return INSTANT_PAYOUT_ENABLED && item && item.status === 'pending' && !item.instantPayout && !item.isRefund && holdRemainingMs(item) > 0;
     }
 
-    // Split a duration into the four countdown tiles.
-    function holdParts(ms) {
-        const total = Math.max(0, Math.floor(ms / 1000));
-        return {
-            d: Math.floor(total / 86400),
-            h: Math.floor((total % 86400) / 3600),
-            m: Math.floor((total % 3600) / 60),
-            s: total % 60,
-        };
-    }
-
-    function holdProgress(item) {
-        const start = Date.parse(item.createdAt || '');
-        const end = Date.parse(item.payoutReleaseAt || '');
-        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 0;
-        return Math.min(100, Math.max(0, ((Date.now() - start) / (end - start)) * 100));
-    }
-
-    // Big live countdown + prominent instant-payout button for a pending withdrawal.
-    function payoutHoldPanel(item) {
-        const ms = holdRemainingMs(item);
-        if (item.status !== 'pending' || item.isRefund) return '';
-        if (item.instantPayout) {
-            return `<div class="payout-hold payout-hold-paid"><span class="payout-hold-bolt" aria-hidden="true">⚡</span><div><strong>Instant payout paid</strong><span>Priority approval. No waiting period.</span></div></div>`;
-        }
-        if (ms <= 0) return '';
-        const t = holdParts(ms);
-        const tile = (key, value, label) => `<div class="payout-tile"><strong data-hold-unit="${key}">${String(value).padStart(2, '0')}</strong><span>${label}</span></div>`;
-        return `
-            <div class="payout-hold" data-hold-release="${escape(item.payoutReleaseAt)}" data-hold-start="${escape(item.createdAt || '')}">
-                <div class="payout-hold-head">
-                    <span class="payout-hold-label"><span class="payout-hold-dot" aria-hidden="true"></span>Pending period</span>
-                    <span class="payout-hold-date">Opens ${escape(formatFullDate(item.payoutReleaseAt))}</span>
-                </div>
-                <div class="payout-clock" role="timer" aria-label="Time left in pending period: ${escape(formatHold(ms))}">
-                    ${tile('d', t.d, t.d === 1 ? 'Day' : 'Days')}<i aria-hidden="true">:</i>${tile('h', t.h, 'Hrs')}<i aria-hidden="true">:</i>${tile('m', t.m, 'Min')}<i aria-hidden="true">:</i>${tile('s', t.s, 'Sec')}
-                </div>
-                <div class="payout-bar" aria-hidden="true"><span data-hold-bar style="width:${holdProgress(item).toFixed(1)}%"></span></div>
-                <div class="payout-bar-note"><span>Withdrawal submitted</span><span>Approval opens</span></div>
-                ${canPayInstant(item) ? `
-                <button class="payout-instant" type="button" onclick="showInstantPayout('${escape(item.reference)}')">
-                    <span class="payout-instant-bolt" aria-hidden="true">⚡</span>
-                    <span class="payout-instant-text"><strong>Instant payout</strong><small>Skip the wait</small></span>
-                    <span class="payout-instant-fee">${ghs(INSTANT_PAYOUT_FEE)}</span>
-                </button>` : ''}
-            </div>`;
-    }
-
-    // One shared 1s ticker keeps every visible countdown live without re-rendering the list.
-    let payoutHoldTimer = null;
-    function tickPayoutHolds() {
-        const panels = document.querySelectorAll('.payout-hold[data-hold-release]');
-        if (!panels.length) return;
-        let expired = false;
-        panels.forEach(panel => {
-            const end = Date.parse(panel.dataset.holdRelease);
-            const start = Date.parse(panel.dataset.holdStart);
-            const ms = end - Date.now();
-            if (!Number.isFinite(ms)) return;
-            if (ms <= 0) { expired = true; return; }
-            const t = holdParts(ms);
-            const set = (k, v) => panel.querySelectorAll(`[data-hold-unit="${k}"]`).forEach(el => { const txt = String(v).padStart(2, '0'); if (el.textContent !== txt) el.textContent = txt; });
-            set('d', t.d); set('h', t.h); set('m', t.m); set('s', t.s);
-            const bar = panel.querySelector('[data-hold-bar]');
-            if (bar && Number.isFinite(start) && end > start) bar.style.width = Math.min(100, Math.max(0, ((Date.now() - start) / (end - start)) * 100)).toFixed(1) + '%';
-        });
-        if (expired && typeof window.renderWithdrawalStatusList === 'function') window.renderWithdrawalStatusList();
-    }
-    function startPayoutHoldTicker() {
-        if (payoutHoldTimer) return;
-        payoutHoldTimer = window.setInterval(tickPayoutHolds, 1000);
-    }
-
     window.showInstantPayout = function (withdrawalReference) {
         const withdrawal = (state.withdrawals || []).find(item => item.reference === withdrawalReference);
         if (!withdrawal || !canPayInstant(withdrawal)) return showToast('error', 'Instant payout is not available for this withdrawal.');
@@ -2124,7 +2051,7 @@
             const holdMs = holdRemainingMs(item);
             const instantAvailable = canPayInstant(item);
             const help = item.status === 'pending'
-                ? (item.instantPayout ? 'Instant payout paid. Priority admin approval.' : holdMs > 0 ? 'Your payout is in its pending period.' : 'Waiting for admin approval.')
+                ? (item.instantPayout ? 'Instant payout paid. Priority admin approval.' : holdMs > 0 ? `Pending period: payout approval opens in ${formatHold(holdMs)}.` : 'Waiting for admin approval.')
                 : item.status === WITHDRAWAL_PENDING_KYC
                     ? bypassAwaitingPayment
                         ? `${ghs(KYC_BYPASS_FEE)} Paystack payment is awaiting confirmation. This withdrawal stays pending until that payment succeeds.`
@@ -2150,7 +2077,7 @@
             const mobileDescription = item.status === 'approved'
                 ? (item.kycBypassUsed ? 'KYC bypass payment' : 'Approved by admin for payout')
                 : item.status === 'pending'
-                    ? (item.instantPayout ? 'Instant payout paid · priority approval' : holdMs > 0 ? 'Pending period in progress' : 'Waiting for admin approval')
+                    ? (item.instantPayout ? 'Instant payout paid · priority approval' : holdMs > 0 ? `Approval opens in ${formatHold(holdMs)}` : 'Waiting for admin approval')
                     : item.status === WITHDRAWAL_PENDING_KYC
                         ? (bypassAwaitingPayment ? `${ghs(KYC_BYPASS_FEE)} payment awaiting confirmation` : 'One-time KYC payment required')
                         : item.status === 'rejected'
@@ -2170,6 +2097,7 @@
                         </div>
                         <div class="withdrawal-status-meta">${escape(meta)}</div>
                         ${item.adminNote ? `<div class="withdrawal-status-meta">Admin note: ${escape(item.adminNote)}</div>` : ''}
+                        ${item.status === 'pending' && holdMs > 0 ? `<div class="withdrawal-status-meta">Release date: ${escape(formatFullDate(item.payoutReleaseAt))}</div>` : ''}
                         ${item.status === WITHDRAWAL_PENDING_KYC ? `<div class="withdrawal-status-meta">${bypassAwaitingPayment ? `Paystack is confirming the refundable ${ghs(KYC_BYPASS_FEE)} fee. No approval is granted until confirmation succeeds.` : `Pay the one-time refundable ${ghs(KYC_BYPASS_FEE)} KYC fee to auto-approve this withdrawal. You will not be asked again.`}</div>` : ''}
                         ${refundLinkMarkup}
                     </div>
@@ -2177,9 +2105,9 @@
                         <div class="withdrawal-status-amount">${ghs(item.actualAmount ?? item.amount)}</div>
                         ${Number(item.operationalCharge || 0) > 0 ? `<div class="withdrawal-status-meta">Requested ${ghs(item.requestedAmount || item.amount)} · Charge ${ghs(item.operationalCharge)}</div>` : ''}
                         ${item.status === WITHDRAWAL_PENDING_KYC ? `<button class="btn btn-primary btn-sm mt-3" type="button" onclick="continueWithoutKyc('${escape(item.reference)}')">${bypassAwaitingPayment ? 'Resume GHS 70.00 payment' : 'Pay ${ghs(KYC_BYPASS_FEE)}'}</button>` : ''}
+                        ${instantAvailable ? `<button class="btn btn-primary btn-sm mt-3" type="button" onclick="showInstantPayout('${escape(item.reference)}')">Instant payout · ${ghs(INSTANT_PAYOUT_FEE)}</button>` : ''}
                         ${receipt ? `<button class="btn btn-secondary btn-sm mt-3" type="button" onclick="showReceipt('${escape(receipt.reference)}')">Receipt</button>` : ''}
                     </div>
-                    ${payoutHoldPanel(item) ? `<div class="payout-hold-wrap">${payoutHoldPanel(item)}</div>` : ''}
                 </div>
                 <article class="withdrawal-status-mobile">
                     <div class="withdrawal-mobile-header">
@@ -2198,7 +2126,7 @@
                     </div>
                     ${item.adminNote ? `<div class="withdrawal-mobile-note">Admin note: ${escape(item.adminNote)}</div>` : ''}
                     ${refundLinkMarkup}
-                    ${payoutHoldPanel(item)}
+                    ${instantAvailable ? `<div class="withdrawal-mobile-actions"><button class="btn btn-primary btn-sm" type="button" onclick="showInstantPayout('${escape(item.reference)}')">Instant payout · ${ghs(INSTANT_PAYOUT_FEE)}</button></div>` : ''}
                     ${item.status === WITHDRAWAL_PENDING_KYC ? `<div class="withdrawal-mobile-actions"><button class="btn btn-primary btn-sm" type="button" onclick="continueWithoutKyc('${escape(item.reference)}')">${bypassAwaitingPayment ? 'Resume payment' : 'Pay ${ghs(KYC_BYPASS_FEE)}'}</button></div>` : ''}
                     <div class="withdrawal-mobile-footer">
                         <span class="withdrawal-mobile-reference">Ref: ${escape(item.reference)}</span>
@@ -2207,7 +2135,6 @@
                 </article>
             `;
         }).join('');
-        startPayoutHoldTicker();
     };
 
     const SHOP_PRICE_RANGES = [
