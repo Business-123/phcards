@@ -1869,6 +1869,73 @@ async function handleClaimGiftRequest(req, res) {
     json(res, 201, { state: publicState(db, user), purchase: publicPurchase(purchase) });
   });
 }
+// ---- Admin backup & restore -------------------------------------------------
+// A backup is ONE json file holding the whole database plus (optionally) the KYC
+// document files that live next to it on the volume. Login sessions and password-reset
+// tokens are never exported, so a leaked backup cannot be used to hijack an account.
+const BACKUP_FORMAT = 'phantom-cards-backup';
+const BACKUP_MAX_BYTES = Number(process.env.BACKUP_MAX_MB || 150) * 1024 * 1024;
+const SAFE_NAME = /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,150}$/;
+function backupCounts(db, kycFiles = 0) {
+  return { users: db.users.length, cards: db.cards.length, purchases: db.purchases.length, transactions: db.transactions.length, withdrawals: db.withdrawals.length, kycFiles };
+}
+function buildBackup(db, { includeKyc = true } = {}) {
+  const data = JSON.parse(JSON.stringify(db));
+  data.sessions = []; data.adminSessions = []; data.passwordResets = [];
+  const kycDocuments = [];
+  if (includeKyc && fs.existsSync(KYC_DOCUMENTS_DIR)) {
+    for (const userEntry of fs.readdirSync(KYC_DOCUMENTS_DIR, { withFileTypes: true })) {
+      if (!userEntry.isDirectory() || !SAFE_NAME.test(userEntry.name)) continue;
+      const userDir = path.join(KYC_DOCUMENTS_DIR, userEntry.name);
+      for (const fileEntry of fs.readdirSync(userDir, { withFileTypes: true })) {
+        if (!fileEntry.isFile() || !SAFE_NAME.test(fileEntry.name)) continue;
+        kycDocuments.push({ userId: userEntry.name, storageKey: fileEntry.name, content: fs.readFileSync(path.join(userDir, fileEntry.name)).toString('base64') });
+      }
+    }
+  }
+  return { format: BACKUP_FORMAT, backupVersion: 1, exportedAt: now(), includesKycDocuments: Boolean(includeKyc), counts: backupCounts(data, kycDocuments.length), db: data, kycDocuments };
+}
+// Accepts our backup file, or a raw phantom-cards.json copied straight off the volume.
+function backupParts(input) {
+  if (!input || typeof input !== 'object') return null;
+  const database = input.format === BACKUP_FORMAT ? input.db : input;
+  if (!database || typeof database !== 'object' || !Array.isArray(database.users) || !Array.isArray(database.cards)) return null;
+  return { database, kycDocuments: input.format === BACKUP_FORMAT && Array.isArray(input.kycDocuments) ? input.kycDocuments : [] };
+}
+async function readLargeJson(req, limitBytes) {
+  const chunks = []; let total = 0; let tooLarge = false;
+  for await (const chunk of req) { total += chunk.length; if (total > limitBytes) { tooLarge = true; continue; } chunks.push(chunk); }
+  if (tooLarge) throw new Error(`Backup file is too large (limit ${Math.round(limitBytes / 1048576)} MB).`);
+  try { return JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch { throw new Error('That file is not valid JSON.'); }
+}
+async function restoreBackup(input, admin) {
+  const parts = backupParts(input);
+  if (!parts) throw new Error('That file is not a Phantom Cards backup.');
+  if (Number(parts.database.version) > blankDb().version) throw new Error('This backup was made by a newer version of the app and cannot be restored here.');
+  for (const doc of parts.kycDocuments) {
+    if (!doc || !SAFE_NAME.test(String(doc.userId || '')) || !SAFE_NAME.test(String(doc.storageKey || '')) || typeof doc.content !== 'string') throw new Error('The backup contains an invalid KYC document entry.');
+  }
+  return withPurchaseMutation(async () => {
+    const live = load();
+    // Safety copy of what is on the volume right now, so a bad restore can be undone.
+    const safetyCopy = `${DATA_FILE}.pre-restore-${Date.now()}`;
+    fs.copyFileSync(DATA_FILE, safetyCopy);
+    const next = normalizeDb(JSON.parse(JSON.stringify(parts.database)));
+    next.adminSessions = live.adminSessions.filter(session => session.expiresAt > Date.now()); // the admin doing the restore stays signed in
+    const userIds = new Set(next.users.map(user => user.id));
+    next.sessions = live.sessions.filter(session => userIds.has(session.userId));
+    next.passwordResets = [];
+    for (const doc of parts.kycDocuments) {
+      const userDir = path.join(KYC_DOCUMENTS_DIR, doc.userId);
+      fs.mkdirSync(userDir, { recursive: true });
+      fs.writeFileSync(path.join(userDir, doc.storageKey), Buffer.from(doc.content, 'base64'), { mode: 0o600 });
+    }
+    const counts = backupCounts(next, parts.kycDocuments.length);
+    adminAudit(next, { admin, action: 'backup.restore', targetType: 'system', targetId: 'database', before: backupCounts(live), after: counts, reason: `Restored from backup. Previous data kept at ${path.basename(safetyCopy)}` });
+    save(next);
+    return { counts, safetyCopy: path.basename(safetyCopy) };
+  });
+}
 async function route(req, res) {
   const url = new URL(req.url, appBaseUrlForRoute(req)); const { pathname } = url;
   // Everything below, including the initial load(), is inside this try/catch: a single
@@ -2181,6 +2248,28 @@ async function route(req, res) {
     if (req.method === 'GET' && pathname === '/api/admin/audit-logs') {
       if (!requireAdmin(req, res, db)) return;
       return json(res, 200, adminPage(db.adminAuditLogs.slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))), url, [item => item.action, item => item.targetType, item => item.targetId, item => item.adminEmail, item => item.reason]));
+    }
+    if (req.method === 'GET' && pathname === '/api/admin/backup') {
+      const admin = requireAdmin(req, res, db); if (!admin) return;
+      const includeKyc = url.searchParams.get('kyc') !== '0';
+      const backup = await withPurchaseMutation(async () => {
+        const fresh = load();
+        const result = buildBackup(fresh, { includeKyc });
+        adminAudit(fresh, { admin, action: 'backup.export', targetType: 'system', targetId: 'database', after: { ...result.counts, includesKycDocuments: includeKyc } });
+        save(fresh);
+        return result;
+      });
+      const payload = JSON.stringify(backup);
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      res.writeHead(200, { 'content-type': 'application/json', 'content-disposition': `attachment; filename="phantom-cards-backup-${stamp}.json"`, 'cache-control': 'no-store', 'content-length': Buffer.byteLength(payload) });
+      return res.end(payload);
+    }
+    if (req.method === 'POST' && pathname === '/api/admin/restore') {
+      const admin = requireAdmin(req, res, db); if (!admin) return;
+      let p;
+      try { p = await readLargeJson(req, BACKUP_MAX_BYTES); } catch (error) { return fail(res, 400, error.message); }
+      if (p.confirm !== 'RESTORE') return fail(res, 400, 'Type RESTORE to confirm.');
+      try { return json(res, 200, { ok: true, ...(await restoreBackup(p.backup, admin)) }); } catch (error) { return fail(res, 400, error.message); }
     }
     if (req.method === 'GET' && /^\/api\/admin\/reconciliation\/[^/]+$/.test(pathname)) {
       if (!requireAdmin(req, res, db)) return;

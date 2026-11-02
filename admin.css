@@ -230,3 +230,23 @@ td small { display: block; margin-top: 4px; color: var(--faint); font-size: 9px;
 .tier-switch.on { background: var(--gold); }
 .tier-switch.on span { transform: translateX(20px); }
 .tier-switch:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Backup & restore */
+.backup-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; align-items: start; }
+.backup-copy { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.backup-copy code { background: var(--gold-soft); padding: 1px 5px; border-radius: 4px; }
+.backup-check { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; font-size: 13px; font-weight: 600; }
+.backup-warn { margin: 0 0 14px; padding: 10px 12px; border-radius: 8px; background: var(--gold-soft); font-size: 12px; line-height: 1.55; }
+.backup-warn.danger { background: var(--red-soft); color: var(--red); }
+.backup-ok { margin: 14px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--green-soft); color: var(--green); font-size: 13px; font-weight: 700; line-height: 1.55; }
+.backup-summary { margin: 14px 0; }
+.backup-summary strong { display: block; font-size: 13px; word-break: break-all; }
+.backup-summary small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+.backup-summary ul { list-style: none; margin: 12px 0 0; padding: 0; border: 1px solid var(--border); border-radius: 10px; }
+.backup-summary li { display: flex; justify-content: space-between; padding: 9px 13px; font-size: 13px; }
+.backup-summary li + li { border-top: 1px solid var(--border); }
+.backup-confirm { display: block; margin-bottom: 12px; font-size: 12px; }
+.backup-confirm input { display: block; width: 100%; margin-top: 6px; min-height: 38px; padding: 0 12px; border: 1px solid var(--border-dark); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; }
+.danger-button { min-height: 38px; padding: 0 15px; border-radius: 8px; border: 1px solid transparent; background: var(--red); color: #fff; font-weight: 800; cursor: pointer; }
+.danger-button:disabled { opacity: .45; cursor: not-allowed; }
+.is-hidden { display: none !important; }

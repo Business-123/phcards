@@ -107,3 +107,10 @@ Watch `GET /api/health` (`paymentReconciler`) and filter the admin card-payments
 `PAID_UNFULFILLED`, `PAID_DUPLICATE` or `PAID_AMOUNT_MISMATCH`: those customers paid but need a manual refund or fix.
 
 6. Admin credit (manual): **Admin → Card payments → Credit card**. Use only after confirming in the Paystack dashboard that the money arrived; it needs a written reason and is recorded in Audit Logs.
+
+## Backup & restore (Admin → Backup & Restore)
+
+- **Download data** saves the whole database (and, optionally, KYC documents) as one `.json` file. Login sessions and password-reset tokens are never included.
+- **Upload / restore** replaces all current data with a backup file. It also accepts a raw `phantom-cards.json`. Before restoring, the app saves a copy of the current data next to the data file as `phantom-cards.json.pre-restore-<timestamp>`.
+- To move the site to a new Railway project: download a backup from the old site, deploy the new one (with its volume mounted at `/data`), sign in to its `/admin`, and restore the file there.
+- `BACKUP_MAX_MB` (default 150) caps the size of an uploaded backup.

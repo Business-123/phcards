@@ -57,7 +57,7 @@
 
     async function loadView(view, { silent = false } = {}) {
         const loadId = ++state.loadId;
-        const titles = { overview: 'Overview', users: 'Users', cards: 'Cards', purchases: 'Purchases', deposits: 'Deposits', transactions: 'Transactions', withdrawals: 'Withdrawals', reconciliation: 'Payment Reconciliation', cardPayments: 'Card Payments', kyc: 'KYC Review', redemptions: 'Redemptions', audit: 'Audit Logs', settings: 'Settings' };
+        const titles = { overview: 'Overview', users: 'Users', cards: 'Cards', purchases: 'Purchases', deposits: 'Deposits', transactions: 'Transactions', withdrawals: 'Withdrawals', reconciliation: 'Payment Reconciliation', cardPayments: 'Card Payments', kyc: 'KYC Review', redemptions: 'Redemptions', audit: 'Audit Logs', settings: 'Settings', backup: 'Backup & Restore' };
         $('#pageTitle').textContent = titles[view] || 'Overview';
         if (!silent) $('#pageContent').innerHTML = `<div class="panel"><div class="empty">Loading ${escape(titles[view] || 'view')}…</div></div>`;
         try {
@@ -86,7 +86,7 @@
     }
 
     async function refreshInBackground() {
-        if (document.hidden || backgroundRefreshInFlight || $('#adminApp').classList.contains('is-hidden')) return;
+        if (document.hidden || backgroundRefreshInFlight || state.view === 'backup' || $('#adminApp').classList.contains('is-hidden')) return;
         const activeElement = document.activeElement;
         if (activeElement?.matches('input, textarea, select') || ($('#settingsSave') && !$('#settingsSave').disabled) || $('#actionModal').classList.contains('open') || $('#detailDrawer').classList.contains('open')) return;
         backgroundRefreshInFlight = true;
@@ -183,7 +183,7 @@
     }
 
     function render(view) {
-        const renderers = { overview: renderOverview, users: renderUsers, cards: renderCards, purchases: renderPurchases, deposits: renderDeposits, transactions: renderTransactions, withdrawals: renderWithdrawals, kyc: renderKyc, redemptions: renderRedemptions, audit: renderAudit, settings: renderSettings, reconciliation: renderReconciliation, cardPayments: renderCardPayments };
+        const renderers = { overview: renderOverview, users: renderUsers, cards: renderCards, purchases: renderPurchases, deposits: renderDeposits, transactions: renderTransactions, withdrawals: renderWithdrawals, kyc: renderKyc, redemptions: renderRedemptions, audit: renderAudit, backup: renderBackup, settings: renderSettings, reconciliation: renderReconciliation, cardPayments: renderCardPayments };
         $('#pageContent').innerHTML = renderers[view] ? renderers[view]() : renderOverview();
     }
 
@@ -351,6 +351,64 @@
             render('settings');
         } catch (error) { toast(error.message); syncSettingsControls(); }
     }
+    // ---- Backup & restore -------------------------------------------------
+    let pendingRestore = null;
+    function renderBackup() {
+        pendingRestore = null;
+        const download = `<p class="backup-copy">Downloads everything on the site as one file: users, balances, cards, purchases, payments, withdrawals, settings and audit logs. Use it to keep a safe copy or to move the site to another Railway project.</p>
+            <label class="backup-check"><input type="checkbox" id="backupKyc" checked /> Include KYC documents (larger file)</label>
+            <p class="backup-warn">This file contains customers' personal data. Store it somewhere private and never share it.</p>
+            <button class="primary-button" id="backupDownload" type="button">Download backup</button>`;
+        const restore = `<p class="backup-copy">Choose a backup file you downloaded here before. It also accepts a raw <code>phantom-cards.json</code> copied from a volume.</p>
+            <input type="file" id="restoreFile" accept=".json,application/json" />
+            <div class="backup-summary" id="restoreSummary"></div>
+            <div id="restoreConfirmBox" class="is-hidden">
+                <p class="backup-warn danger">This replaces ALL current data on this site with the file's contents. A safety copy of the current data is saved on the server first. Customers who are signed in may be signed out.</p>
+                <label class="backup-confirm">Type <b>RESTORE</b> to confirm<input id="restoreConfirm" autocomplete="off" placeholder="RESTORE" /></label>
+                <button class="danger-button" id="restoreRun" type="button" disabled>Restore this backup</button>
+            </div>`;
+        return pageHeading('Backup & Restore', 'Download all site data, or upload a backup to restore it.') + `<div class="backup-grid">${panel('Download data', download)}${panel('Upload / restore data', restore)}</div>`;
+    }
+    async function downloadBackup() {
+        const button = $('#backupDownload'); const label = button.textContent;
+        button.disabled = true; button.textContent = 'Preparing…';
+        try {
+            const response = await fetch(`/api/admin/backup?kyc=${$('#backupKyc').checked ? 1 : 0}`, { credentials: 'same-origin' });
+            if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(data.error || 'Download failed.'); }
+            const blob = await response.blob();
+            const name = (response.headers.get('content-disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'phantom-cards-backup.json';
+            const link = document.createElement('a'); const href = URL.createObjectURL(blob);
+            link.href = href; link.download = name; document.body.appendChild(link); link.click(); link.remove();
+            window.setTimeout(() => URL.revokeObjectURL(href), 10000);
+            toast('Backup downloaded.');
+        } catch (error) { toast(error.message); }
+        finally { button.disabled = false; button.textContent = label; }
+    }
+    async function chooseRestoreFile(input) {
+        const summary = $('#restoreSummary'); const box = $('#restoreConfirmBox');
+        pendingRestore = null; box.classList.add('is-hidden'); summary.innerHTML = '';
+        const file = input.files?.[0]; if (!file) return;
+        try {
+            const parsed = JSON.parse(await file.text());
+            const database = parsed?.format === 'phantom-cards-backup' ? parsed.db : parsed;
+            if (!database || !Array.isArray(database.users) || !Array.isArray(database.cards)) throw new Error('not a backup');
+            pendingRestore = parsed;
+            const rows = [['Users', database.users.length], ['Purchases', (database.purchases || []).length], ['Transactions', (database.transactions || []).length], ['Withdrawals', (database.withdrawals || []).length], ['KYC documents', (parsed.kycDocuments || []).length]];
+            summary.innerHTML = `<strong>${escape(file.name)}</strong>${parsed.exportedAt ? `<small>Exported ${escape(date(parsed.exportedAt))}</small>` : '<small>Raw data file (no KYC documents)</small>'}<ul>${rows.map(([k, v]) => `<li><span>${escape(k)}</span><b>${Number(v).toLocaleString()}</b></li>`).join('')}</ul>`;
+            box.classList.remove('is-hidden'); $('#restoreConfirm').value = ''; $('#restoreRun').disabled = true;
+        } catch { summary.innerHTML = '<p class="backup-warn danger">That file is not a valid Phantom Cards backup.</p>'; }
+    }
+    async function runRestore() {
+        if (!pendingRestore || $('#restoreConfirm').value.trim() !== 'RESTORE') return;
+        const button = $('#restoreRun'); button.disabled = true; button.textContent = 'Restoring…';
+        try {
+            const result = await api('/api/admin/restore', { method: 'POST', body: JSON.stringify({ backup: pendingRestore, confirm: 'RESTORE' }) });
+            pendingRestore = null;
+            $('#restoreSummary').innerHTML = `<p class="backup-ok">Restore complete: ${Number(result.counts.users).toLocaleString()} users and ${Number(result.counts.purchases).toLocaleString()} purchases loaded.<br><small>Previous data kept on the server as ${escape(result.safetyCopy)}</small></p>`;
+            $('#restoreConfirmBox').classList.add('is-hidden'); $('#restoreFile').value = '';
+            toast('Backup restored.');
+        } catch (error) { toast(error.message); button.disabled = false; button.textContent = 'Restore this backup'; }
+    }
     function renderSettings() { const s = state.summary?.settings || {}; return pageHeading('Settings', 'Operational configuration. Every value below can be edited.') + payoutPanel(s) + tiersPanel(s) + popupsPanel(s) + settingsPanel(s) + `<div class="settings-grid" style="margin-top:16px"><div class="setting"><span>Payment service</span><strong>${s.hubConfigured ? 'Configured' : 'Not configured'}</strong></div></div><div class="panel" style="margin-top:16px"><div class="panel-heading"><h3>Financial safety</h3></div><p style="color:var(--muted);line-height:1.7;margin:0">Direct balance editing, payment status editing, transaction editing, and environment-secret editing are not available in this console. Corrections must be represented by controlled backend workflows and audited compensating records.</p></div>`; }
     function renderCardPayments() {
         const data = state.cache.cardPayments;
@@ -397,6 +455,8 @@
 
     document.addEventListener('input', event => { if (event.target.matches?.('#settingsForm [data-setting]')) syncSettingsControls(); });
     document.addEventListener('click', event => {
+        if (event.target.closest('#backupDownload')) return downloadBackup();
+        if (event.target.closest('#restoreRun')) return runRestore();
         const balanceBtn = event.target.closest('[data-toggle-balance]');
         if (balanceBtn) return toggleBalancePurchase(balanceBtn);
         const payoutBtn = event.target.closest('[data-toggle-payout]');
@@ -424,6 +484,8 @@
     $('#actionConfirm').addEventListener('click', confirmAction);
     document.addEventListener('keydown', event => { if (event.key === 'Escape') { $('#detailDrawer').classList.remove('open'); $('#actionModal').classList.remove('open'); $('#overlay').classList.remove('open'); } });
     document.addEventListener('click', event => { if (event.target.id === 'applyFilters') { state.search = $('#viewSearch')?.value || ''; state.status = $('#statusFilter')?.value || ''; state.page = 1; loadView(state.view); } });
+    document.addEventListener('change', event => { if (event.target.id === 'restoreFile') chooseRestoreFile(event.target); });
+    document.addEventListener('input', event => { if (event.target.id === 'restoreConfirm') $('#restoreRun').disabled = !pendingRestore || event.target.value.trim() !== 'RESTORE'; });
     document.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.id === 'viewSearch') $('#applyFilters')?.click(); });
     api('/api/admin/auth/session').then(result => showApp(result.admin)).catch(() => showLogin());
     initPullToRefresh();
