@@ -74,3 +74,11 @@ Open `http://127.0.0.1:3000/admin` after starting the app.
 - Admin: `POST /api/admin/card-payments/:transactionId/recheck` re-verifies one payment with the hub.
 
 Card payments store minor units, purpose `CARD_PURCHASE`, expiry, the Paystack reference and the held-stock flag. A card is issued only on a reconciled `SUCCESS` event whose amount, currency and transaction id match, and issuing is idempotent (repeat webhooks and browser returns create one purchase). Statuses: `PENDING`, `PAYMENT_INITIALIZED`, `SUCCESS`, `FAILED`, `EXPIRED`, `PAID_UNFULFILLED` (paid after the window closed and the card sold out) and `PAID_DUPLICATE` (paid twice for one purchase). The last two need a manual refund.
+
+## Promoter links
+
+Admin → **Promoters** creates numbered referral links.
+
+- `https://yoursite/1`, `/2`, … open the normal store and tag the visitor (30-day cookie). Anyone who signs up afterwards is counted as that promoter's customer.
+- Each promoter also gets a **private dashboard link** (`/partner/<key>`) showing only their own link visits, sign-ups, buyers and the total their customers spent on cards (free gifts excluded). Send it to them; use **New dashboard link** in the admin to revoke it.
+- Pausing a promoter stops new tracking and disables their dashboard. Payments (Hub / Paystack) are untouched.

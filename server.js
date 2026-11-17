@@ -404,7 +404,7 @@ function makeCards() {
     return i === 0 ? { ...card, ...gift, price: 0, priceGhs: 0, displayPriceUsd: 0, stock: 999999, active: true } : card;
   });
 }
-function blankDb() { return { version: 5, cards: makeCards(), users: [], sessions: [], adminSessions: [], adminAuditLogs: [], deposits: [], cardPayments: [], purchases: [], dailyPurchaseCounts: [], codes: [], methods: [], withdrawals: [], transactions: [], receipts: [], passwordResets: [], kycBypassPayments: [], instantPayoutPayments: [], settings: settingsDefaults() }; }
+function blankDb() { return { version: 5, cards: makeCards(), users: [], sessions: [], adminSessions: [], adminAuditLogs: [], deposits: [], cardPayments: [], purchases: [], dailyPurchaseCounts: [], codes: [], methods: [], withdrawals: [], transactions: [], receipts: [], passwordResets: [], kycBypassPayments: [], instantPayoutPayments: [], promoters: [], settings: settingsDefaults() }; }
 function syncCardCatalog(cards) {
   const generated = makeCards();
   const generatedMap = new Map(generated.map(card => [card.id, card]));
@@ -651,7 +651,7 @@ function purgePendingKycWithdrawals(clean) {
 }
 function normalizeDb(db) {
   const clean = { ...blankDb(), ...(db || {}) };
-  for (const key of ['users', 'sessions', 'adminSessions', 'adminAuditLogs', 'deposits', 'cardPayments', 'purchases', 'dailyPurchaseCounts', 'codes', 'methods', 'withdrawals', 'transactions', 'receipts', 'passwordResets', 'kycBypassPayments', 'instantPayoutPayments']) {
+  for (const key of ['users', 'sessions', 'adminSessions', 'adminAuditLogs', 'deposits', 'cardPayments', 'purchases', 'dailyPurchaseCounts', 'codes', 'methods', 'withdrawals', 'transactions', 'receipts', 'passwordResets', 'kycBypassPayments', 'instantPayoutPayments', 'promoters']) {
     if (!Array.isArray(clean[key])) clean[key] = [];
   }
   clean.settings = cleanSettings(clean.settings);
@@ -1563,6 +1563,38 @@ function adminSafeCode(code, card, user) {
     redemptionReference: code.redemptionReference || null,
   };
 }
+// ---- Promoters (referral links like /1, /2) -------------------------------------------
+// A promoter gets a public referral link (/N) that tags new sign-ups, and a private
+// dashboard link (/partner/<key>) that shows ONLY their own totals. Attribution is stored
+// on the user (user.promoterId) and totals are computed from existing purchases, so the
+// Paystack / Hub payment flow is never touched.
+const REF_COOKIE = 'phantom_ref';
+function promoterByNumber(db, value) { const n = Number(value); return Number.isInteger(n) && n > 0 ? db.promoters.find(p => p.number === n) : null; }
+function maskName(name) { const parts = String(name || '').trim().split(/\s+/).filter(Boolean); if (!parts.length) return 'Customer'; return parts.length > 1 ? `${parts[0]} ${parts[parts.length - 1][0].toUpperCase()}.` : parts[0]; }
+function promoterStats(db, promoter) {
+  const users = db.users.filter(u => u.promoterId === promoter.id);
+  const ids = new Set(users.map(u => u.id));
+  const purchases = db.purchases.filter(p => ids.has(p.userId) && !p.isFreeGift && Number(p.amountPaid ?? p.amount ?? 0) > 0);
+  const amountOf = p => Number(p.amountPaid ?? p.amount ?? 0);
+  const byUser = new Map();
+  for (const p of purchases) { const row = byUser.get(p.userId) || { cards: 0, amount: 0 }; row.cards += 1; row.amount += amountOf(p); byUser.set(p.userId, row); }
+  const days = []; const dayTotals = new Map();
+  for (const p of purchases) { const day = ghanaCalendarDate(new Date(p.createdAt).getTime()); dayTotals.set(day, (dayTotals.get(day) || 0) + amountOf(p)); }
+  for (let i = 13; i >= 0; i--) { const day = ghanaCalendarDate(Date.now() - i * DAY_MS); days.push({ date: day, amount: money(dayTotals.get(day) || 0) }); }
+  return {
+    clicks: Number(promoter.clicks || 0),
+    signups: users.length,
+    buyers: byUser.size,
+    cardsPurchased: purchases.length,
+    totalPurchased: money(purchases.reduce((sum, p) => sum + amountOf(p), 0)),
+    trend: days,
+    users: users.slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || ''))).slice(0, 100).map(u => ({ name: maskName(u.name), joinedAt: u.createdAt, cards: byUser.get(u.id)?.cards || 0, amount: money(byUser.get(u.id)?.amount || 0) })),
+  };
+}
+function adminPromoterRow(db, promoter) {
+  const stats = promoterStats(db, promoter);
+  return { id: promoter.id, number: promoter.number, name: promoter.name, note: promoter.note || '', active: promoter.active !== false, accessKey: promoter.accessKey, createdAt: promoter.createdAt, clicks: stats.clicks, signups: stats.signups, buyers: stats.buyers, cardsPurchased: stats.cardsPurchased, totalPurchased: stats.totalPurchased };
+}
 function adminPage(items, url, searchFields = [], statusField = 'status') {
   const query = url.searchParams;
   const search = String(query.get('search') || '').trim().toLowerCase();
@@ -1946,6 +1978,22 @@ async function route(req, res) {
     if (hasExpiredCardPayments(db)) { await withPurchaseMutation(async () => { sweepCardPayments(load()); }); db = load(); }
     if (!pathname.startsWith('/api/')) {
       if (pathname === '/admin' || pathname === '/admin/') return staticFile(req, res, '/admin.html') || fail(res, 404, 'Not found');
+      // Referral link: /1, /2 ... tags the visitor to a promoter, then shows the normal store.
+      const refMatch = pathname.match(/^\/(\d{1,6})\/?$/);
+      if (refMatch) {
+        if (pathname.endsWith('/')) { res.writeHead(302, { location: `/${refMatch[1]}` }); return res.end(); }
+        const promoter = promoterByNumber(db, refMatch[1]);
+        const headers = {};
+        if (promoter && promoter.active !== false) {
+          if (cookie(req)[REF_COOKIE] !== String(promoter.number)) { promoter.clicks = Number(promoter.clicks || 0) + 1; save(db); }
+          const secure = requestOrigin(req).startsWith('https://') ? '; Secure' : '';
+          headers['set-cookie'] = `${REF_COOKIE}=${promoter.number}; SameSite=Lax; Path=/; Max-Age=${60 * 60 * 24 * 30}${secure}`;
+        }
+        for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
+        return staticFile(req, res, '/index.html') || fail(res, 404, 'Not found');
+      }
+      // Private promoter dashboard page (the key in the URL is checked by the API).
+      if (/^\/partner\/[A-Za-z0-9_-]{16,80}\/?$/.test(pathname)) return staticFile(req, res, '/partner.html') || fail(res, 404, 'Not found');
       return staticFile(req, res, decodeURIComponent(pathname)) || fail(res, 404, 'Not found');
     }
     if (!originAllowed(req)) return fail(res, 403, 'Request origin is not allowed.');
@@ -2061,6 +2109,45 @@ async function route(req, res) {
         save(fresh);
         return json(res, 200, { ok: true });
       });
+    }
+    if (req.method === 'GET' && pathname === '/api/partner/dashboard') {
+      const key = String(req.headers['x-partner-key'] || '');
+      const promoter = key.length >= 16 ? db.promoters.find(p => p.accessKey && safeEqual(p.accessKey, key)) : null;
+      if (!promoter || promoter.active === false) return fail(res, 404, 'This dashboard link is not valid.');
+      return json(res, 200, { promoter: { name: promoter.name, number: promoter.number }, ...promoterStats(db, promoter), generatedAt: now() }, { 'cache-control': 'no-store' });
+    }
+    if (req.method === 'GET' && pathname === '/api/admin/promoters') {
+      if (!requireAdmin(req, res, db)) return;
+      const items = db.promoters.slice().sort((a, b) => a.number - b.number).map(p => adminPromoterRow(db, p));
+      const page = adminPage(items, url, [i => i.name, i => i.number, i => i.note]);
+      return json(res, 200, { ...page, totals: { promoters: items.length, signups: items.reduce((n, i) => n + i.signups, 0), totalPurchased: money(items.reduce((n, i) => n + i.totalPurchased, 0)) } });
+    }
+    if (req.method === 'POST' && pathname === '/api/admin/promoters') {
+      const admin = requireAdmin(req, res, db); if (!admin) return;
+      const p = await body(req);
+      const name = String(p.name || '').trim().slice(0, 80);
+      if (!name) return fail(res, 400, 'Enter the promoter name.');
+      const number = db.promoters.reduce((max, item) => Math.max(max, item.number), 0) + 1;
+      const promoter = { id: uid('promo'), number, name, note: String(p.note || '').trim().slice(0, 200), accessKey: crypto.randomBytes(24).toString('hex'), active: true, clicks: 0, createdAt: now() };
+      db.promoters.push(promoter);
+      adminAudit(db, { admin, action: 'promoter.create', targetType: 'promoter', targetId: promoter.id, after: { number, name } });
+      save(db);
+      return json(res, 201, { ok: true, promoter: adminPromoterRow(db, promoter) });
+    }
+    if (req.method === 'POST' && /^\/api\/admin\/promoters\/[^/]+\/(toggle|rekey)$/.test(pathname)) {
+      const admin = requireAdmin(req, res, db); if (!admin) return;
+      const parts = pathname.split('/'); const promoter = db.promoters.find(item => item.id === decodeURIComponent(parts[4]));
+      if (!promoter) return fail(res, 404, 'Promoter was not found.');
+      if (parts[5] === 'toggle') {
+        const p = await body(req); const before = { active: promoter.active !== false };
+        promoter.active = typeof p.active === 'boolean' ? p.active : !before.active;
+        adminAudit(db, { admin, action: 'promoter.toggle', targetType: 'promoter', targetId: promoter.id, before, after: { active: promoter.active } });
+      } else {
+        promoter.accessKey = crypto.randomBytes(24).toString('hex');
+        adminAudit(db, { admin, action: 'promoter.rekey', targetType: 'promoter', targetId: promoter.id });
+      }
+      save(db);
+      return json(res, 200, { ok: true, promoter: adminPromoterRow(db, promoter) });
     }
     if (req.method === 'POST' && pathname === '/api/admin/auth/login') {
       if (!adminCredentialsConfigured()) return fail(res, 503, 'Admin credentials are not configured. Set ADMIN_EMAIL and ADMIN_PASSWORD_HASH (or ADMIN_PASSWORD).');
@@ -2385,7 +2472,7 @@ async function route(req, res) {
       console.log('[user:unblocked]', userId);
       return json(res, 200, { ok: true, user: adminSafeUser(target, db) });
     }
-    if (req.method === 'POST' && pathname === '/api/auth/signup') { const p = await body(req); const email = normalizeEmail(p.email); const phone = normalizePhone(p.phone); if (!p.name?.trim() || !validMobile(phone)) return fail(res, 400, 'Enter your full name and a 10-digit mobile number that starts with 0.'); if (!validGmail(email)) return fail(res, 400, 'Email must be a valid @gmail.com address.'); if (String(p.password || '').length < 6) return fail(res, 400, 'Password must be at least 6 characters.'); if (db.users.some(u => normalizePhone(u.phone) === phone)) return fail(res, 409, 'An account already exists for this mobile number.'); if (db.users.some(u => normalizeEmail(u.email) === email)) return fail(res, 409, 'An account already exists for this email.'); const user = { id: uid('usr'), name: p.name.trim(), email, phone, contactEmailCapturedAt: now(), passwordHash: await hash(p.password), pinHash: null, walletBalance: 0, redeemedBalance: 0, kycStatus: KYC_STATUS.NOT_VERIFIED, kycVerifiedAt: null, createdAt: now() }; db.users.push(user); const token = crypto.randomBytes(32).toString('hex'); db.sessions.push({ token, userId: user.id, expiresAt: Date.now() + SESSION_MAX_AGE }); save(db); return json(res, 201, publicState(db, user), { 'set-cookie': sessionCookie(token, req) }); }
+    if (req.method === 'POST' && pathname === '/api/auth/signup') { const p = await body(req); const email = normalizeEmail(p.email); const phone = normalizePhone(p.phone); if (!p.name?.trim() || !validMobile(phone)) return fail(res, 400, 'Enter your full name and a 10-digit mobile number that starts with 0.'); if (!validGmail(email)) return fail(res, 400, 'Email must be a valid @gmail.com address.'); if (String(p.password || '').length < 6) return fail(res, 400, 'Password must be at least 6 characters.'); if (db.users.some(u => normalizePhone(u.phone) === phone)) return fail(res, 409, 'An account already exists for this mobile number.'); if (db.users.some(u => normalizeEmail(u.email) === email)) return fail(res, 409, 'An account already exists for this email.'); const user = { id: uid('usr'), name: p.name.trim(), email, phone, contactEmailCapturedAt: now(), passwordHash: await hash(p.password), pinHash: null, walletBalance: 0, redeemedBalance: 0, kycStatus: KYC_STATUS.NOT_VERIFIED, kycVerifiedAt: null, createdAt: now() }; const refPromoter = promoterByNumber(db, cookie(req)[REF_COOKIE]); if (refPromoter && refPromoter.active !== false) { user.promoterId = refPromoter.id; user.referredAt = now(); } db.users.push(user); const token = crypto.randomBytes(32).toString('hex'); db.sessions.push({ token, userId: user.id, expiresAt: Date.now() + SESSION_MAX_AGE }); save(db); return json(res, 201, publicState(db, user), { 'set-cookie': sessionCookie(token, req) }); }
     if (req.method === 'POST' && pathname === '/api/auth/login') { const p = await body(req); const identifier = String(p.email || '').trim(); const user = db.users.find(u => normalizeEmail(u.email) === normalizeEmail(identifier) || normalizePhone(u.phone) === normalizePhone(identifier)); if (!user || !await passwordMatches(p.password || '', user.passwordHash)) return fail(res, 401, 'Incorrect email or mobile number, or password.'); if (user.blocked) return fail(res, 403, 'Your account has been blocked. Contact support for help.'); const token = crypto.randomBytes(32).toString('hex'); db.sessions.push({ token, userId: user.id, expiresAt: Date.now() + SESSION_MAX_AGE }); save(db); return json(res, 200, publicState(db, user), { 'set-cookie': sessionCookie(token, req) }); }
     if (req.method === 'POST' && pathname === '/api/auth/logout') { const token = cookie(req).phantom_session; db.sessions = db.sessions.filter(s => s.token !== token); save(db); return json(res, 200, { ok: true }, { 'set-cookie': clearSessionCookie(req) }); }
     if (req.method === 'POST' && pathname === '/api/auth/forgot') {

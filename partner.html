@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Promoter Dashboard · PHANTOM CARDS</title>
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" href="/icon-96.png" type="image/png" sizes="96x96" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,600;14..32,800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/admin.css?v=20261117" />
+    <style>
+        .partner-wrap { max-width: 980px; margin: 0 auto; padding: 28px 18px 60px; }
+        .partner-brand { margin: 0 0 22px; font-size: 14px; font-weight: 800; letter-spacing: .12em; }
+        .partner-brand span { color: var(--gold); margin-right: 7px; }
+        .partner-brand b { color: var(--gold-dark); }
+        .partner-hello h1 { margin: 0; font-size: 24px; letter-spacing: -.03em; }
+        .partner-hello p { margin: 6px 0 22px; color: var(--muted); }
+        .link-box { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 14px 0 0; }
+        .link-box code { flex: 1; min-width: 200px; padding: 10px 12px; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 9px; font-size: 12px; overflow-wrap: anywhere; }
+        .bars { display: flex; align-items: flex-end; gap: 6px; height: 140px; padding-top: 10px; border-bottom: 1px solid var(--border); }
+        .bars div { flex: 1; min-height: 3px; background: var(--gold); border-radius: 4px 4px 0 0; position: relative; }
+        .bar-labels { display: flex; gap: 6px; margin-top: 6px; }
+        .bar-labels span { flex: 1; color: var(--faint); font-size: 8px; text-align: center; }
+        .partner-error { margin-top: 80px; text-align: center; color: var(--muted); }
+        .updated { margin-top: 18px; color: var(--faint); font-size: 10px; text-align: center; }
+        .hero-total { margin-bottom: 14px; cursor: default; }
+        .hero-total:hover { transform: none; }
+    </style>
+</head>
+<body>
+    <div class="partner-wrap" id="app"><div class="panel"><div class="empty">Loading your dashboard…</div></div></div>
+    <script>
+    (function () {
+        const key = location.pathname.split('/').filter(Boolean).pop();
+        const app = document.getElementById('app');
+        const money = v => 'GH₵' + Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        const dshort = v => v ? new Date(v).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+        const metric = (label, value, meta) => `<article class="metric-card"><div class="metric-top"><span>${esc(label)}</span></div><div class="metric-value">${esc(value)}</div><div class="metric-meta">${esc(meta)}</div></article>`;
+        async function load() {
+            try {
+                const res = await fetch('/api/partner/dashboard', { headers: { 'x-partner-key': key }, cache: 'no-store' });
+                const d = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(d.error || 'Could not load.');
+                render(d);
+            } catch (e) {
+                if (!app.dataset.loaded) app.innerHTML = `<div class="partner-error"><h2>Dashboard unavailable</h2><p>${esc(e.message)}</p></div>`;
+            }
+        }
+        function render(d) {
+            app.dataset.loaded = '1';
+            const link = `${location.origin}/${d.promoter.number}`;
+            const max = Math.max(1, ...d.trend.map(t => t.amount));
+            const bars = d.trend.map(t => `<div style="height:${Math.round(t.amount / max * 100)}%" title="${esc(t.date)}: ${money(t.amount)}"></div>`).join('');
+            const labels = d.trend.map(t => `<span>${esc(t.date.slice(5))}</span>`).join('');
+            const rows = d.users.map(u => `<tr><td><strong>${esc(u.name)}</strong></td><td>${dshort(u.joinedAt)}</td><td class="amount">${u.cards}</td><td class="amount">${money(u.amount)}</td></tr>`).join('') || `<tr><td colspan="4"><div class="empty"><strong>No sign-ups yet</strong><span>Share your link to get started.</span></div></td></tr>`;
+            app.innerHTML = `
+                <p class="partner-brand"><span>✦</span>PHANTOM <b>CARDS</b></p>
+                <div class="partner-hello"><h1>Hi ${esc(d.promoter.name)}</h1><p>Your personal promoter dashboard. Figures update automatically.</p></div>
+                <section class="hero-total"><div class="hero-total-body"><span class="hero-total-label">Total your customers spent on cards</span><strong class="hero-total-value">${money(d.totalPurchased)}</strong><span class="hero-total-meta">${d.cardsPurchased.toLocaleString()} card${d.cardsPurchased === 1 ? '' : 's'} bought by ${d.buyers.toLocaleString()} customer${d.buyers === 1 ? '' : 's'}</span></div></section>
+                <div class="metric-grid">${metric('Link visits', d.clicks.toLocaleString(), 'People who opened your link')}${metric('Sign-ups', d.signups.toLocaleString(), 'Accounts created via your link')}${metric('Buyers', d.buyers.toLocaleString(), 'Sign-ups who bought a card')}${metric('Cards bought', d.cardsPurchased.toLocaleString(), 'Excludes free gifts')}</div>
+                <section class="panel mt-16"><div class="panel-heading"><h3>Your referral link</h3></div><p style="margin:0;color:var(--muted)">Share this link. Anyone who signs up after opening it is counted as yours.</p><div class="link-box"><code id="refLink">${esc(link)}</code><button class="primary-button" id="copyLink">Copy link</button></div></section>
+                <section class="panel mt-16"><div class="panel-heading"><h3>Card purchases · last 14 days</h3></div><div class="bars">${bars}</div><div class="bar-labels">${labels}</div></section>
+                <section class="panel table-panel mt-16"><div class="panel-heading" style="padding:18px 18px 0"><h3>Your customers</h3></div><div class="table-wrap"><table><thead><tr><th>Customer</th><th>Joined</th><th>Cards</th><th>Spent on cards</th></tr></thead><tbody>${rows}</tbody></table></div></section>
+                <p class="updated">Last updated ${new Date(d.generatedAt).toLocaleTimeString()}</p>`;
+            document.getElementById('copyLink').onclick = async function () { try { await navigator.clipboard.writeText(link); this.textContent = 'Copied ✓'; } catch { this.textContent = 'Select & copy'; } setTimeout(() => { this.textContent = 'Copy link'; }, 1800); };
+        }
+        load(); setInterval(() => { if (!document.hidden) load(); }, 30000);
+    })();
+    </script>
+</body>
+</html>

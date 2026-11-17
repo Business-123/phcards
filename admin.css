@@ -250,3 +250,16 @@ td small { display: block; margin-top: 4px; color: var(--faint); font-size: 9px;
 .danger-button { min-height: 38px; padding: 0 15px; border-radius: 8px; border: 1px solid transparent; background: var(--red); color: #fff; font-weight: 800; cursor: pointer; }
 .danger-button:disabled { opacity: .45; cursor: not-allowed; }
 .is-hidden { display: none !important; }
+
+/* Hero total: card purchase volume */
+.hero-total { display: flex; align-items: center; gap: 22px; margin-bottom: 14px; padding: 26px 30px; color: #fff; background: linear-gradient(135deg, #2d271b 0%, #1e1b18 55%, #3a2f16 100%); border: 1px solid #4a3d1f; border-radius: 18px; box-shadow: 0 16px 36px rgba(68, 52, 30, .22); cursor: pointer; transition: transform .15s ease, box-shadow .15s ease; }
+.hero-total:hover { transform: translateY(-1px); box-shadow: 0 20px 42px rgba(68, 52, 30, .28); }
+.hero-total-icon { width: 58px; height: 58px; flex: none; display: grid; place-items: center; border-radius: 16px; color: var(--text); background: var(--gold); }
+.hero-total-icon svg { width: 28px; height: 28px; }
+.hero-total-body { display: grid; gap: 6px; min-width: 0; }
+.hero-total-label { color: var(--gold); font-size: 11px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+.hero-total-value { color: #fff; font-size: 44px; font-weight: 800; line-height: 1.05; letter-spacing: -.05em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.hero-total-meta { color: rgba(255, 255, 255, .62); font-size: 12px; }
+.hero-total-link { margin-left: auto; padding: 9px 14px; color: var(--text); background: var(--gold); border-radius: 99px; font-size: 11px; font-weight: 800; white-space: nowrap; }
+.hero-total:hover .hero-total-link { background: #f0b82e; }
+@media (max-width: 760px) { .hero-total { flex-wrap: wrap; gap: 14px; padding: 20px; } .hero-total-icon { width: 46px; height: 46px; border-radius: 13px; } .hero-total-value { font-size: 34px; } .hero-total-link { margin-left: 0; } }
