@@ -57,6 +57,7 @@ const RATE_LIMITS = {
   '/api/claim-gift': 20,
   '/api/redemptions': 30,
   '/api/withdrawals': 20,
+  '/api/partner/dashboard': 120,
 };
 const rateBuckets = new Map();
 // Withdrawal limit: nothing can be withdrawn until the redeemed balance reaches this.
@@ -1569,6 +1570,8 @@ function adminSafeCode(code, card, user) {
 // on the user (user.promoterId) and totals are computed from existing purchases, so the
 // Paystack / Hub payment flow is never touched.
 const REF_COOKIE = 'phantom_ref';
+const ACCESS_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no look-alikes (0/O, 1/I/L)
+function newAccessCode() { let out = ''; for (let i = 0; i < 8; i++) out += ACCESS_CODE_ALPHABET[crypto.randomInt(ACCESS_CODE_ALPHABET.length)]; return out; }
 function promoterByNumber(db, value) { const n = Number(value); return Number.isInteger(n) && n > 0 ? db.promoters.find(p => p.number === n) : null; }
 function maskName(name) { const parts = String(name || '').trim().split(/\s+/).filter(Boolean); if (!parts.length) return 'Customer'; return parts.length > 1 ? `${parts[0]} ${parts[parts.length - 1][0].toUpperCase()}.` : parts[0]; }
 function promoterStats(db, promoter) {
@@ -1992,8 +1995,8 @@ async function route(req, res) {
         for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
         return staticFile(req, res, '/index.html') || fail(res, 404, 'Not found');
       }
-      // Private promoter dashboard page (the key in the URL is checked by the API).
-      if (/^\/partner\/[A-Za-z0-9_-]{16,80}\/?$/.test(pathname)) return staticFile(req, res, '/partner.html') || fail(res, 404, 'Not found');
+      // Promoter dashboard page: /admin1, /admin2 ... The page asks for the promoter's access code.
+      if (/^\/admin\d{1,6}\/?$/.test(pathname)) return staticFile(req, res, '/partner.html') || fail(res, 404, 'Not found');
       return staticFile(req, res, decodeURIComponent(pathname)) || fail(res, 404, 'Not found');
     }
     if (!originAllowed(req)) return fail(res, 403, 'Request origin is not allowed.');
@@ -2111,9 +2114,10 @@ async function route(req, res) {
       });
     }
     if (req.method === 'GET' && pathname === '/api/partner/dashboard') {
-      const key = String(req.headers['x-partner-key'] || '');
-      const promoter = key.length >= 16 ? db.promoters.find(p => p.accessKey && safeEqual(p.accessKey, key)) : null;
-      if (!promoter || promoter.active === false) return fail(res, 404, 'This dashboard link is not valid.');
+      const code = String(req.headers['x-partner-code'] || '').trim();
+      const promoter = promoterByNumber(db, req.headers['x-partner-number']);
+      const valid = promoter && promoter.active !== false && code.length >= 6 && safeEqual(String(promoter.accessKey || '').toUpperCase(), code.toUpperCase());
+      if (!valid) return fail(res, 401, 'That access code is not correct, or this dashboard is paused.');
       return json(res, 200, { promoter: { name: promoter.name, number: promoter.number }, ...promoterStats(db, promoter), generatedAt: now() }, { 'cache-control': 'no-store' });
     }
     if (req.method === 'GET' && pathname === '/api/admin/promoters') {
@@ -2128,7 +2132,7 @@ async function route(req, res) {
       const name = String(p.name || '').trim().slice(0, 80);
       if (!name) return fail(res, 400, 'Enter the promoter name.');
       const number = db.promoters.reduce((max, item) => Math.max(max, item.number), 0) + 1;
-      const promoter = { id: uid('promo'), number, name, note: String(p.note || '').trim().slice(0, 200), accessKey: crypto.randomBytes(24).toString('hex'), active: true, clicks: 0, createdAt: now() };
+      const promoter = { id: uid('promo'), number, name, note: String(p.note || '').trim().slice(0, 200), accessKey: newAccessCode(), active: true, clicks: 0, createdAt: now() };
       db.promoters.push(promoter);
       adminAudit(db, { admin, action: 'promoter.create', targetType: 'promoter', targetId: promoter.id, after: { number, name } });
       save(db);
@@ -2143,7 +2147,7 @@ async function route(req, res) {
         promoter.active = typeof p.active === 'boolean' ? p.active : !before.active;
         adminAudit(db, { admin, action: 'promoter.toggle', targetType: 'promoter', targetId: promoter.id, before, after: { active: promoter.active } });
       } else {
-        promoter.accessKey = crypto.randomBytes(24).toString('hex');
+        promoter.accessKey = newAccessCode();
         adminAudit(db, { admin, action: 'promoter.rekey', targetType: 'promoter', targetId: promoter.id });
       }
       save(db);
@@ -2242,6 +2246,26 @@ async function route(req, res) {
       if (!requireAdmin(req, res, db)) return;
       const items = db.cards.map(card => ({ ...card, purchaseCount: db.purchases.filter(item => item.cardId === card.id).length, redeemedCount: db.codes.filter(item => item.cardId === card.id && item.status === 'redeemed').length }));
       return json(res, 200, adminPage(items.sort((a, b) => String(a.title).localeCompare(String(b.title))), url, [item => item.id, item => item.title, item => item.category, item => item.series], 'active'));
+    }
+    if (req.method === 'POST' && pathname === '/api/admin/cards/restock') {
+      const admin = requireAdmin(req, res, db); if (!admin) return;
+      const p = await body(req);
+      const level = Number(p.level === undefined ? 50 : p.level);
+      if (!Number.isInteger(level) || level < 1 || level > 1000) return fail(res, 400, 'Enter a whole number from 1 to 1000 for the stock level.');
+      // Same queue as purchases, so a sale in flight cannot be overwritten by this write.
+      return withPurchaseMutation(async () => {
+        const fresh = load();
+        let restocked = 0; let unitsAdded = 0;
+        for (const card of fresh.cards) {
+          if (card.isFreeGift) continue; // the free gift is always available
+          const current = Math.max(0, Math.trunc(Number(card.stock) || 0));
+          if (current < level) { restocked++; unitsAdded += level - current; card.stock = level; }
+          card.active = card.stock > 0;
+        }
+        adminAudit(fresh, { admin, action: 'cards.restock', targetType: 'cards', targetId: 'all', after: { level, restocked, unitsAdded } });
+        save(fresh);
+        return json(res, 200, { ok: true, level, restocked, unitsAdded, totalCards: fresh.cards.filter(c => !c.isFreeGift).length });
+      });
     }
     if (req.method === 'GET' && pathname === '/api/admin/purchases') {
       if (!requireAdmin(req, res, db)) return;

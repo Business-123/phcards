@@ -7,6 +7,11 @@ test('promoter links track sign-ups and card purchases, and dashboards are priva
   const admin = (await site.request('/api/admin/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'test-admin-password' }) })).cookie;
   const post = (p, body = {}) => site.request(p, { method: 'POST', body: JSON.stringify(body) }, admin);
 
+  // Ordinary static files must still be served (regression guard).
+  assert.equal((await fetch(`${site.baseUrl}/app.js`)).status, 200);
+  assert.equal((await fetch(`${site.baseUrl}/admin`)).status, 200);
+  assert.equal((await fetch(`${site.baseUrl}/admin.css`)).status, 200);
+
   // Only admins can manage promoters.
   assert.equal((await site.request('/api/admin/promoters')).status, 401);
   assert.equal((await site.request('/api/admin/promoters', { method: 'POST', body: JSON.stringify({ name: 'x' }) })).status, 401);
@@ -15,7 +20,7 @@ test('promoter links track sign-ups and card purchases, and dashboards are priva
   const p1 = (await post('/api/admin/promoters', { name: 'Ama Promoter' })).data.promoter;
   const p2 = (await post('/api/admin/promoters', { name: 'Kofi Promoter' })).data.promoter;
   assert.equal(p1.number, 1); assert.equal(p2.number, 2);
-  assert.ok(p1.accessKey.length >= 32 && p1.accessKey !== p2.accessKey);
+  assert.match(p1.accessKey, /^[A-HJKMNP-Z2-9]{8}$/); assert.notEqual(p1.accessKey, p2.accessKey);
 
   // /1 shows the store, tags the visitor and counts one visit per visitor.
   const hit = await fetch(`${site.baseUrl}/1`);
@@ -46,7 +51,7 @@ test('promoter links track sign-ups and card purchases, and dashboards are priva
   const otherCard = (await site.request('/api/state', {}, a.cookie)).data.cards.find(c => !c.isFreeGift && c.active && c.stock > 0);
   await site.buyCard(a.cookie, otherCard.id, 'promoter_buy_key_00000002');
 
-  const dash = key => site.request('/api/partner/dashboard', { headers: { 'x-partner-key': key } });
+  const dash = (code, number = 1) => site.request('/api/partner/dashboard', { headers: { 'x-partner-number': String(number), 'x-partner-code': code } });
   const d1 = await dash(p1.accessKey);
   assert.equal(d1.status, 200);
   assert.equal(d1.data.promoter.name, 'Ama Promoter');
@@ -60,14 +65,17 @@ test('promoter links track sign-ups and card purchases, and dashboards are priva
   assert.equal(d1.data.trend.length, 14);
   assert.equal(d1.data.trend.reduce((n, x) => n + x.amount, 0), card.priceGhs);
 
-  const d2 = await dash(p2.accessKey);
+  const d2 = await dash(p2.accessKey, 2);
   assert.equal(d2.data.totalPurchased, 0); assert.equal(d2.data.signups, 1); assert.equal(d2.data.buyers, 0);
 
-  // Dashboard needs a valid key; the page itself is served at /partner/<key>.
-  assert.equal((await dash('wrong-key-wrong-key-wrong')).status, 404);
-  assert.equal((await site.request('/api/partner/dashboard')).status, 404);
-  const page = await fetch(`${site.baseUrl}/partner/${p1.accessKey}`);
-  assert.equal(page.status, 200); assert.match(await page.text(), /Promoter Dashboard/);
+  // Dashboard lives at /admin1, /admin2 ... and needs the promoter's own access code.
+  assert.equal((await dash('WRONGCODE')).status, 401);
+  assert.equal((await dash(p2.accessKey, 1)).status, 401, 'another promoter\'s code does not open this dashboard');
+  assert.equal((await dash(p1.accessKey, 99)).status, 401);
+  assert.equal((await site.request('/api/partner/dashboard')).status, 401);
+  assert.equal((await dash(p1.accessKey.toLowerCase())).status, 200, 'code is not case sensitive');
+  for (const n of [1, 2]) { const page = await fetch(`${site.baseUrl}/admin${n}`); assert.equal(page.status, 200); assert.match(await page.text(), /Promoter Dashboard/); }
+  assert.equal((await fetch(`${site.baseUrl}/partner/${p1.accessKey}`)).status, 404, 'old link style is gone');
 
   // Admin overview adds up per promoter.
   const list = (await site.request('/api/admin/promoters', {}, admin)).data;
@@ -77,16 +85,16 @@ test('promoter links track sign-ups and card purchases, and dashboards are priva
 
   // Pausing stops tracking and the dashboard; resuming restores it.
   assert.equal((await post(`/api/admin/promoters/${p1.id}/toggle`, { active: false })).data.promoter.active, false);
-  assert.equal((await dash(p1.accessKey)).status, 404);
+  assert.equal((await dash(p1.accessKey)).status, 401, 'paused dashboard is locked');
   assert.equal((await fetch(`${site.baseUrl}/1`)).headers.get('set-cookie'), null);
   const late = await site.request('/api/auth/signup', { method: 'POST', body: JSON.stringify({ name: 'Late Joiner', phone: '0245555555', email: 'late@gmail.com', password: 'simple' }) }, 'phantom_ref=1');
   assert.equal(site.readDb().users.find(u => u.id === late.data.user.id).promoterId, undefined);
   await post(`/api/admin/promoters/${p1.id}/toggle`, { active: true });
   assert.equal((await dash(p1.accessKey)).status, 200);
 
-  // A new dashboard link kills the old one.
+  // A new access code kills the old one.
   const rekeyed = (await post(`/api/admin/promoters/${p1.id}/rekey`)).data.promoter;
   assert.notEqual(rekeyed.accessKey, p1.accessKey);
-  assert.equal((await dash(p1.accessKey)).status, 404);
+  assert.equal((await dash(p1.accessKey)).status, 401, 'old code stops working');
   assert.equal((await dash(rekeyed.accessKey)).data.totalPurchased, card.priceGhs);
 });
