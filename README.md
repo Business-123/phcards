@@ -80,7 +80,7 @@ Card payments store minor units, purpose `CARD_PURCHASE`, expiry, the Paystack r
 Admin → **Promoters** creates numbered referral links.
 
 - `https://yoursite/1`, `/2`, … open the normal store and tag the visitor (30-day cookie). Anyone who signs up afterwards is counted as that promoter's customer.
-- Each promoter also gets a **dashboard link** (`/admin1`, `/admin2`, … matching their number) protected by an **8-character access code**. They open the link, enter the code, and see only their own link visits, sign-ups, buyers and the total their customers spent on cards (free gifts excluded). Send the link and code to them privately; **New code** in the admin revokes the old one.
+- Each promoter also gets a **dashboard link** (`/admin1`, `/admin2`, … matching their number) protected by a **4-digit PIN**. They open the link, enter the PIN, and see only their own link visits, sign-ups, buyers and the total their customers spent on cards (free gifts excluded). Send the link and PIN to them privately; **New PIN** in the admin revokes the old one. After 10 wrong guesses a dashboard locks for 15 minutes.
 - Pausing a promoter stops new tracking and disables their dashboard. Payments (Hub / Paystack) are untouched.
 
 ## Restock

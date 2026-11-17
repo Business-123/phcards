@@ -20,7 +20,7 @@ test('promoter links track sign-ups and card purchases, and dashboards are priva
   const p1 = (await post('/api/admin/promoters', { name: 'Ama Promoter' })).data.promoter;
   const p2 = (await post('/api/admin/promoters', { name: 'Kofi Promoter' })).data.promoter;
   assert.equal(p1.number, 1); assert.equal(p2.number, 2);
-  assert.match(p1.accessKey, /^[A-HJKMNP-Z2-9]{8}$/); assert.notEqual(p1.accessKey, p2.accessKey);
+  assert.match(p1.accessKey, /^\d{4}$/); assert.notEqual(p1.accessKey, p2.accessKey);
 
   // /1 shows the store, tags the visitor and counts one visit per visitor.
   const hit = await fetch(`${site.baseUrl}/1`);
@@ -69,12 +69,11 @@ test('promoter links track sign-ups and card purchases, and dashboards are priva
   assert.equal(d2.data.totalPurchased, 0); assert.equal(d2.data.signups, 1); assert.equal(d2.data.buyers, 0);
 
   // Dashboard lives at /admin1, /admin2 ... and needs the promoter's own access code.
-  assert.equal((await dash('WRONGCODE')).status, 401);
+  assert.equal((await dash('abcd')).status, 401);
   assert.equal((await dash(p2.accessKey, 1)).status, 401, 'another promoter\'s code does not open this dashboard');
   assert.equal((await dash(p1.accessKey, 99)).status, 401);
   assert.equal((await site.request('/api/partner/dashboard')).status, 401);
-  assert.equal((await dash(p1.accessKey.toLowerCase())).status, 200, 'code is not case sensitive');
-  for (const n of [1, 2]) { const page = await fetch(`${site.baseUrl}/admin${n}`); assert.equal(page.status, 200); assert.match(await page.text(), /Promoter Dashboard/); }
+    for (const n of [1, 2]) { const page = await fetch(`${site.baseUrl}/admin${n}`); assert.equal(page.status, 200); assert.match(await page.text(), /Promoter Dashboard/); }
   assert.equal((await fetch(`${site.baseUrl}/partner/${p1.accessKey}`)).status, 404, 'old link style is gone');
 
   // Admin overview adds up per promoter.
@@ -97,4 +96,17 @@ test('promoter links track sign-ups and card purchases, and dashboards are priva
   assert.notEqual(rekeyed.accessKey, p1.accessKey);
   assert.equal((await dash(p1.accessKey)).status, 401, 'old code stops working');
   assert.equal((await dash(rekeyed.accessKey)).data.totalPurchased, card.priceGhs);
+});
+
+test('a promoter PIN cannot be brute-forced: repeated wrong guesses lock the dashboard', { timeout: 30000 }, async t => {
+  const site = await createSite(t, { withHub: false, env: { ADMIN_EMAIL: 'admin@example.com', ADMIN_PASSWORD: 'test-admin-password' } });
+  const admin = (await site.request('/api/admin/auth/login', { method: 'POST', body: JSON.stringify({ email: 'admin@example.com', password: 'test-admin-password' }) })).cookie;
+  const promoter = (await site.request('/api/admin/promoters', { method: 'POST', body: JSON.stringify({ name: 'Lock Test' }) }, admin)).data.promoter;
+  const dash = code => site.request('/api/partner/dashboard', { headers: { 'x-partner-number': '1', 'x-partner-code': code } });
+  const wrong = promoter.accessKey === '0000' ? '1111' : '0000';
+  assert.equal((await dash(promoter.accessKey)).status, 200);
+  for (let i = 0; i < 10; i++) assert.equal((await dash(wrong)).status, 401);
+  const locked = await dash(promoter.accessKey);
+  assert.equal(locked.status, 429, 'even the right PIN is refused while locked');
+  assert.match(locked.data.error, /minute/);
 });

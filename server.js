@@ -1570,8 +1570,14 @@ function adminSafeCode(code, card, user) {
 // on the user (user.promoterId) and totals are computed from existing purchases, so the
 // Paystack / Hub payment flow is never touched.
 const REF_COOKIE = 'phantom_ref';
-const ACCESS_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no look-alikes (0/O, 1/I/L)
-function newAccessCode() { let out = ''; for (let i = 0; i < 8; i++) out += ACCESS_CODE_ALPHABET[crypto.randomInt(ACCESS_CODE_ALPHABET.length)]; return out; }
+function newAccessCode() { return String(crypto.randomInt(0, 10000)).padStart(4, '0'); } // 4-digit PIN
+// A 4-digit PIN has only 10,000 combinations, so wrong guesses are limited per promoter
+// (not per IP, so spreading guesses over many addresses does not help).
+const PIN_MAX_FAILS = 10;
+const PIN_LOCK_MS = 15 * 60 * 1000;
+const pinFailures = new Map();
+function pinLockedMs(promoterId) { const f = pinFailures.get(promoterId); return f && f.lockedUntil > Date.now() ? f.lockedUntil - Date.now() : 0; }
+function pinFailed(promoterId) { const f = pinFailures.get(promoterId) || { count: 0, lockedUntil: 0 }; if (f.lockedUntil && f.lockedUntil <= Date.now()) { f.count = 0; f.lockedUntil = 0; } f.count += 1; if (f.count >= PIN_MAX_FAILS) { f.lockedUntil = Date.now() + PIN_LOCK_MS; } pinFailures.set(promoterId, f); }
 function promoterByNumber(db, value) { const n = Number(value); return Number.isInteger(n) && n > 0 ? db.promoters.find(p => p.number === n) : null; }
 function maskName(name) { const parts = String(name || '').trim().split(/\s+/).filter(Boolean); if (!parts.length) return 'Customer'; return parts.length > 1 ? `${parts[0]} ${parts[parts.length - 1][0].toUpperCase()}.` : parts[0]; }
 function promoterStats(db, promoter) {
@@ -2116,8 +2122,13 @@ async function route(req, res) {
     if (req.method === 'GET' && pathname === '/api/partner/dashboard') {
       const code = String(req.headers['x-partner-code'] || '').trim();
       const promoter = promoterByNumber(db, req.headers['x-partner-number']);
-      const valid = promoter && promoter.active !== false && code.length >= 6 && safeEqual(String(promoter.accessKey || '').toUpperCase(), code.toUpperCase());
-      if (!valid) return fail(res, 401, 'That access code is not correct, or this dashboard is paused.');
+      if (promoter && promoter.active !== false) {
+        const locked = pinLockedMs(promoter.id);
+        if (locked) return json(res, 429, { error: `Too many wrong PINs. Try again in ${Math.ceil(locked / 60000)} minute(s).` }, { 'retry-after': String(Math.ceil(locked / 1000)) });
+      }
+      const valid = promoter && promoter.active !== false && code.length > 0 && safeEqual(String(promoter.accessKey || '').toUpperCase(), code.toUpperCase());
+      if (!valid) { if (promoter && promoter.active !== false) pinFailed(promoter.id); return fail(res, 401, 'That PIN is not correct, or this dashboard is paused.'); }
+      pinFailures.delete(promoter.id);
       return json(res, 200, { promoter: { name: promoter.name, number: promoter.number }, ...promoterStats(db, promoter), generatedAt: now() }, { 'cache-control': 'no-store' });
     }
     if (req.method === 'GET' && pathname === '/api/admin/promoters') {

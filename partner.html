@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,600;14..32,800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/admin.css?v=20261119" />
+    <link rel="stylesheet" href="/admin.css?v=20261120" />
     <style>
         .partner-wrap { max-width: 980px; margin: 0 auto; padding: 28px 18px 60px; }
         .partner-brand { margin: 0 0 22px; font-size: 14px; font-weight: 800; letter-spacing: .12em; }
@@ -46,7 +46,7 @@
         function showLogin(message) {
             app.dataset.loaded = '';
             clearInterval(timer);
-            app.innerHTML = `<p class="partner-brand"><span>✦</span>PHANTOM <b>CARDS</b></p><div class="login-card" style="margin:60px auto 0"><p class="eyebrow">PROMOTER DASHBOARD</p><h1>Enter your access code</h1><p class="login-copy">Use the code you were sent along with this link.</p><form id="codeForm"><label>Access code<input id="codeInput" autocomplete="off" autocapitalize="characters" spellcheck="false" required placeholder="e.g. K7M2QX9P" /></label><button class="primary-button" type="submit" style="margin-top:16px;width:100%">Open dashboard <span>→</span></button><p class="form-error" id="codeError" role="alert">${esc(message || '')}</p></form></div>`;
+            app.innerHTML = `<p class="partner-brand"><span>✦</span>PHANTOM <b>CARDS</b></p><div class="login-card" style="margin:60px auto 0"><p class="eyebrow">PROMOTER DASHBOARD</p><h1>Enter your PIN</h1><p class="login-copy">Use the 4-digit PIN you were sent with this link.</p><form id="codeForm"><label>4-digit PIN<input id="codeInput" type="password" inputmode="numeric" autocomplete="off" spellcheck="false" required placeholder="••••" /></label><button class="primary-button" type="submit" style="margin-top:16px;width:100%">Open dashboard <span>→</span></button><p class="form-error" id="codeError" role="alert">${esc(message || '')}</p></form></div>`;
             document.getElementById('codeForm').onsubmit = e => { e.preventDefault(); code = document.getElementById('codeInput').value.trim(); load(true); };
         }
         async function load(fromForm) {
@@ -55,7 +55,8 @@
             try {
                 const res = await fetch('/api/partner/dashboard', { headers: { 'x-partner-number': number, 'x-partner-code': code }, cache: 'no-store' });
                 const d = await res.json().catch(() => ({}));
-                if (res.status === 401) { code = ''; try { sessionStorage.removeItem(storeKey); } catch (e) {} return showLogin(fromForm ? (d.error || 'Incorrect code.') : 'Please enter your access code again.'); }
+                if (res.status === 401) { code = ''; try { sessionStorage.removeItem(storeKey); } catch (e) {} return showLogin(fromForm ? (d.error || 'Incorrect PIN.') : 'Please enter your PIN again.'); }
+                if (res.status === 429) { code = ''; return showLogin(d.error || 'Too many attempts. Try again later.'); }
                 if (!res.ok) throw new Error(d.error || 'Could not load.');
                 try { sessionStorage.setItem(storeKey, code); } catch (e) {}
                 render(d);
