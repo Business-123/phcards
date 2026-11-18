@@ -20,7 +20,7 @@ async function setup(t) {
   db.transactions.push({ id: 'credit_seed', userId: u.id, type: 'credit', amount: 500, account: 'redeemed', reference: 'SEED_CREDIT', status: 'completed', reason: 'Redeemed code', related: {}, createdAt: new Date().toISOString() });
   site.writeDb(db);
   const settings = body => site.request('/api/admin/settings', { method: 'POST', body: JSON.stringify(body) }, admin.cookie);
-  assert.equal((await settings({ disabledPopups: ['withdrawalLimit', 'cardsNeeded', 'oneMoreCard', 'redeemFiveCards'] })).status, 200);
+  assert.equal((await settings({ disabledPopups: ['withdrawalLimit', 'cardsNeeded', 'oneMoreCard'] })).status, 200);
   const withdraw = amount => site.request('/api/withdrawals', { method: 'POST', body: JSON.stringify({ amount, methodId: method.data.method.id, pin: '1234' }) }, user.cookie);
   const approve = ref => site.request(`/api/admin/withdrawals/${encodeURIComponent(ref)}/approve`, { method: 'POST', body: JSON.stringify({ note: 'ok' }) }, admin.cookie);
   const startInstant = ref => site.request(`/api/withdrawals/${encodeURIComponent(ref)}/instant-payout`, { method: 'POST', body: JSON.stringify({}) }, user.cookie);

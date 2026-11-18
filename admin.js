@@ -312,8 +312,7 @@
     const FALLBACK_POPUPS = [
         { key: 'withdrawalLimit', label: 'Withdrawal limit not reached', description: 'Shown when the redeemed balance is below the minimum withdrawal.' },
         { key: 'cardsNeeded', label: 'N more cards', description: 'Shown when the user has not bought enough cards to unlock withdrawals.' },
-        { key: 'oneMoreCard', label: 'One more card', description: 'Shown after KYC when the user must buy one more card than the requirement.' },
-        { key: 'redeemFiveCards', label: 'Redeem 5 cards in total', description: 'Final stage: shown until the user has redeemed 5 cards.' },
+        { key: 'oneMoreCard', label: 'One more card', description: 'Shown after the instant payout fee is paid: 5 minutes to buy one more card or the withdrawal is rejected.' },
     ];
     function popupsPanel(s) {
         const popups = Array.isArray(s.popups) && s.popups.length ? s.popups : FALLBACK_POPUPS;

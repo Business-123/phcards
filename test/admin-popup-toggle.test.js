@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createSite } = require('./helpers');
 
-const KEYS = ['withdrawalLimit', 'cardsNeeded', 'oneMoreCard', 'redeemFiveCards'];
+const KEYS = ['withdrawalLimit', 'cardsNeeded', 'oneMoreCard'];
 
 async function setup(t) {
   const site = await createSite(t, { env: { ADMIN_EMAIL: 'admin@example.com', ADMIN_PASSWORD: 'test-admin-password' } });
@@ -39,7 +39,7 @@ test('admin lists every withdrawal pop-up, all on by default, and validates the 
   const off = await setPopups(['oneMoreCard'], { note: 'pause' });
   assert.equal(off.status, 200);
   assert.deepEqual(off.data.settings.disabledPopups, ['oneMoreCard']);
-  assert.deepEqual(off.data.settings.popups.map(x => [x.key, x.enabled]), [['withdrawalLimit', true], ['cardsNeeded', true], ['oneMoreCard', false], ['redeemFiveCards', true]]);
+  assert.deepEqual(off.data.settings.popups.map(x => [x.key, x.enabled]), [['withdrawalLimit', true], ['cardsNeeded', true], ['oneMoreCard', false]]);
   assert.deepEqual((await site.request('/api/state', {}, user.cookie)).data.disabledPopups, ['oneMoreCard']);
   assert.deepEqual(site.readDb().settings.disabledPopups, ['oneMoreCard'], 'persisted');
   assert.ok(site.readDb().adminAuditLogs.some(l => l.action === 'settings.popup.disable' && l.reason === 'pause'), 'audited');
@@ -56,7 +56,7 @@ test('switching a pop-up off stops that requirement blocking withdrawals; switch
   const { site, user, setPopups, withdraw } = await setup(t);
 
   // A KYC-verified user with GHS 50 redeemed, no purchased cards and no redeemed cards:
-  // they trip every pop-up in turn.
+  // they trip the limit and card-count pop-ups in turn.
   const db = site.readDb();
   const u = db.users.find(x => x.email === 'popup.toggler@gmail.com');
   u.redeemedBalance = 50; u.kycStatus = 'VERIFIED'; u.kycVerifiedAt = new Date().toISOString();
@@ -75,30 +75,18 @@ test('switching a pop-up off stops that requirement blocking withdrawals; switch
   assert.equal(r.status, 400);
   assert.match(r.data.error, /Purchase 3 more cards/);
 
-  // 3. "N more cards" off: now the post-KYC "one more card" rejection.
-  assert.equal((await setPopups(['withdrawalLimit', 'cardsNeeded'])).status, 200);
-  r = await withdraw(20);
-  assert.equal(r.status, 400);
-  assert.equal(r.data.code, 'NEEDS_ONE_MORE_CARD', JSON.stringify(r.data));
-
-  // 4. "One more card" off: the final "redeem 5 cards" stage.
-  assert.equal((await setPopups(['withdrawalLimit', 'cardsNeeded', 'oneMoreCard'])).status, 200);
-  r = await withdraw(20);
-  assert.equal(r.status, 400);
-  assert.equal(r.data.code, 'NEEDS_FIVE_REDEEMED_CARDS');
-
-  // 5. All off: nothing blocks the user, and the small amount goes through.
+  // 3. All off: nothing blocks the user ("one more card" is no longer a withdrawal-time check; it follows the instant payout fee), and the small amount goes through.
   assert.equal((await setPopups(KEYS)).status, 200);
   r = await withdraw(20);
   assert.equal(r.status, 201, JSON.stringify(r.data));
   assert.equal(r.data.withdrawal.requestedAmount, 20);
   assert.equal(site.readDb().users.find(x => x.id === u.id).redeemedBalance, 30, 'balance debited');
 
-  // 6. A zero amount is still refused even with the limit off.
+  // 4. A zero amount is still refused even with the limit off.
   r = await withdraw(0);
   assert.equal(r.status, 400);
 
-  // 7. Back on: the very first gate is enforced again.
+  // 5. Back on: the very first gate is enforced again.
   assert.equal((await setPopups([])).status, 200);
   r = await withdraw(20);
   assert.equal(r.status, 400);

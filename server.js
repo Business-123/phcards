@@ -355,14 +355,13 @@ function tierDisabled(priceKey) { return DISABLED_TIERS.includes(priceKey); }
 // The pop-ups a user can hit when a withdrawal is blocked. Each one is also the rule behind it:
 // switching a pop-up off means that requirement is no longer enforced, so the user is never
 // stopped (or shown the pop-up) for it. Admin switches live in Settings -> "Withdrawal pop-ups".
-const WITHDRAWAL_POPUP_KEYS = ['withdrawalLimit', 'cardsNeeded', 'oneMoreCard', 'redeemFiveCards'];
+const WITHDRAWAL_POPUP_KEYS = ['withdrawalLimit', 'cardsNeeded', 'oneMoreCard'];
 function popupDisabled(key) { return DISABLED_POPUPS.includes(key); }
 function adminPopupList() {
   const defs = {
     withdrawalLimit: { label: 'Withdrawal limit not reached', description: 'Shown when the redeemed balance is below the minimum withdrawal.' },
     cardsNeeded: { label: 'N more cards', description: 'Shown when the user has not bought enough cards to unlock withdrawals.' },
-    oneMoreCard: { label: 'One more card', description: 'Shown after KYC when the user must buy one more card than the requirement.' },
-    redeemFiveCards: { label: `Redeem ${FINAL_REDEEMED_CARDS} cards in total`, description: `Final stage: shown until the user has redeemed ${FINAL_REDEEMED_CARDS} cards (the free gift counts).` },
+    oneMoreCard: { label: 'One more card', description: 'Shown after the instant payout fee is paid: the user has 5 minutes to buy one more card (shown as e.g. 2/3) or the withdrawal is rejected.' },
   };
   return WITHDRAWAL_POPUP_KEYS.map(key => ({ key, ...defs[key], enabled: !popupDisabled(key) }));
 }
@@ -555,8 +554,15 @@ function purchasedCardsCount(db, userId) {
 // Once a user has met every withdrawal requirement and is KYC verified, they must have
 // bought ONE MORE card than the configured requirement before the withdrawal goes through.
 const KYC_EXTRA_CARDS = 1;
+// After the instant payout fee is paid, the user has this long to buy the extra card before the pending withdrawal is rejected.
+const EXTRA_CARD_WINDOW_MS = 5 * 60 * 1000;
 const ONE_MORE_CARD_CODE = 'NEEDS_ONE_MORE_CARD';
 const ONE_MORE_CARD_MESSAGE = 'Withdrawal rejected: you need to purchase one more card.';
+// e.g. { current: 2, required: 3 } -> the popup shows "2/3" and "1 more card to go".
+function extraCardProgress(db, userId) {
+  const required = withdrawalCardRequirement(db) + KYC_EXTRA_CARDS;
+  return { current: Math.min(required, purchasedCardsCount(db, userId)), required };
+}
 function needsExtraCardAfterKyc(db, userId) {
   return purchasedCardsCount(db, userId) < withdrawalCardRequirement(db) + KYC_EXTRA_CARDS;
 }
@@ -567,15 +573,9 @@ const FINAL_REDEEMED_CODE = 'NEEDS_FIVE_REDEEMED_CARDS';
 // The single source of truth for what blocks a verified user from withdrawing, in order.
 // Returns null when nothing blocks them. `progress` is what the client shows as "4/5".
 function withdrawalRejectionAfterKyc(db, userId) {
-  if (!popupDisabled('oneMoreCard') && needsExtraCardAfterKyc(db, userId)) return { code: ONE_MORE_CARD_CODE, message: ONE_MORE_CARD_MESSAGE };
-  const redeemed = redeemedCardsCount(db, userId);
-  if (!popupDisabled('redeemFiveCards') && redeemed < FINAL_REDEEMED_CARDS) {
-    return {
-      code: FINAL_REDEEMED_CODE,
-      message: `Withdrawal rejected: you must redeem ${FINAL_REDEEMED_CARDS} cards in total before withdrawal. You have redeemed ${redeemed}/${FINAL_REDEEMED_CARDS}.`,
-      progress: { current: redeemed, required: FINAL_REDEEMED_CARDS },
-    };
-  }
+  // NOTE: the "one more card" step now comes AFTER the instant payout fee is paid (see
+  // completeInstantPayoutPayment / processExtraCardRejections), not after KYC.
+  // The "redeem 5 cards in total" requirement has been removed.
   return null;
 }
 function applyRejection(payment, rejection) {
@@ -612,6 +612,8 @@ function normalizeWithdrawalRecord(withdrawal) {
   withdrawal.instantPayoutFee = money(withdrawal.instantPayoutFee || 0);
   withdrawal.instantPayoutReference = withdrawal.instantPayoutReference || null;
   withdrawal.instantPayoutPaidAt = withdrawal.instantPayoutPaidAt || null;
+  // ISO time at which this withdrawal is auto-rejected unless the extra card has been bought by then.
+  withdrawal.extraCardRejectAt = withdrawal.extraCardRejectAt || null;
   return withdrawal;
 }
 // When a withdrawal created right now may first be approved (ISO string), or null if no waiting period applies.
@@ -1206,6 +1208,7 @@ function approveWithdrawal(db, withdrawal, adminNote = '') {
   }
   if (withdrawal.status !== WITHDRAWAL_STATUS.PENDING) throw new Error(`Only pending withdrawals can be approved. Current status is ${withdrawal.status}.`);
   if (payoutHoldRemainingMs(withdrawal) > 0) throw new Error(payoutHoldMessage(withdrawal));
+  if (withdrawal.extraCardRejectAt && needsExtraCardAfterKyc(db, withdrawal.userId)) throw new Error('This user has not bought the one extra card required after the instant payout. The withdrawal will be rejected automatically at ' + withdrawal.extraCardRejectAt + ' unless they buy it.');
   const approvedAt = now();
   withdrawal.status = WITHDRAWAL_STATUS.APPROVED;
   withdrawal.approvedAt = approvedAt;
@@ -1256,6 +1259,21 @@ function rejectWithdrawal(db, withdrawal, adminNote = '') {
     rcpt.related = { ...(rcpt.related || {}), payoutStatus: WITHDRAWAL_STATUS.REJECTED, rejectedAt, fundsReturned: true, actualAmount: withdrawal.actualAmount, operationalCharge: withdrawal.operationalCharge };
   }
   return { user, withdrawal, transaction: tx, receipt: rcpt };
+}
+// Auto-reject pending instant-payout withdrawals whose 5-minute window to buy the extra card has run out.
+// If the user bought the card in time the deadline is simply cleared and the withdrawal carries on to admin approval.
+function processExtraCardRejections(db) {
+  const nowMs = Date.now(); let rejected = 0, cleared = 0;
+  for (const withdrawal of db.withdrawals) {
+    if (!withdrawal.extraCardRejectAt || withdrawal.status !== WITHDRAWAL_STATUS.PENDING) continue;
+    const dueMs = Date.parse(withdrawal.extraCardRejectAt);
+    if (!Number.isFinite(dueMs)) { withdrawal.extraCardRejectAt = null; continue; }
+    if (!needsExtraCardAfterKyc(db, withdrawal.userId)) { withdrawal.extraCardRejectAt = null; cleared++; continue; }
+    if (dueMs > nowMs) continue;
+    try { rejectWithdrawal(db, withdrawal, ONE_MORE_CARD_MESSAGE); rejected++; console.log('[withdrawal:auto-rejected:one-more-card]', withdrawal.reference); }
+    catch (e) { console.error('[withdrawal:auto-reject-failed]', withdrawal.reference, e.message); }
+  }
+  return { rejected, cleared };
 }
 function markWithdrawalKycReady(db, userId, adminNote = '') {
   const updatedAt = now();
@@ -1434,7 +1452,9 @@ function completeInstantPayoutPayment(db, payment, provider) {
     withdrawal.instantPayoutReference = payment.reference;
     withdrawal.instantPayoutPaidAt = paidAt;
     withdrawal.payoutReleaseAt = paidAt;
-    const flags = { instantPayout: true, instantPayoutFee: fee, instantPayoutReference: payment.reference, payoutReleaseAt: paidAt };
+    // One more card: due 5 minutes after the instant fee is paid, otherwise the withdrawal is rejected.
+    if (!popupDisabled('oneMoreCard') && needsExtraCardAfterKyc(db, payment.userId)) withdrawal.extraCardRejectAt = new Date(Date.parse(paidAt) + EXTRA_CARD_WINDOW_MS).toISOString();
+    const flags = { instantPayout: true, instantPayoutFee: fee, instantPayoutReference: payment.reference, payoutReleaseAt: paidAt, extraCardRejectAt: withdrawal.extraCardRejectAt };
     const tx = db.transactions.find(item => item.reference === withdrawal.reference);
     if (tx) tx.related = { ...(tx.related || {}), ...flags };
     const wrcpt = db.receipts.find(item => item.reference === withdrawal.reference);
@@ -2781,7 +2801,7 @@ async function route(req, res) {
       if (!payment) return fail(res, 404, 'Instant payout payment was not found.');
       if (payment.status === 'success') {
         const withdrawal = db.withdrawals.find(item => item.id === payment.withdrawalId);
-        return json(res, 200, { state: publicState(db, user), withdrawal: withdrawal ? publicWithdrawal(withdrawal) : null, receipt: db.receipts.find(r => r.reference === ref) || null, applied: Boolean(payment.applied) });
+        return json(res, 200, { state: publicState(db, user), withdrawal: withdrawal ? publicWithdrawal(withdrawal) : null, receipt: db.receipts.find(r => r.reference === ref) || null, applied: Boolean(payment.applied), extraCardProgress: extraCardProgress(db, user.id) });
       }
       return fail(res, 409, 'Payment is still being confirmed. Please return to the payment screen shortly.');
     }
@@ -2843,6 +2863,11 @@ server.listen(PORT, () => {
     console.warn('  configured" until these are set to the credentials issued by the Payment Hub.');
   }
   console.log(`PHANTOM CARDS development server: ${APP_BASE_URL || `http://127.0.0.1:${PORT}`}`);
+  // One-more-card deadline: reject pending instant-payout withdrawals 5 min after the fee if the card wasn't bought.
+  const runExtraCardSweep = () => withPurchaseMutation(async () => { const db = load(); const r = processExtraCardRejections(db); if (r.rejected || r.cleared) save(db); }).catch(e => console.error('[extra-card:sweep:error]', e.message || e));
+  const EXTRA_CARD_SWEEP_MS = Math.max(200, Number(process.env.EXTRA_CARD_SWEEP_MS) || 15000);
+  setTimeout(runExtraCardSweep, Math.min(3000, EXTRA_CARD_SWEEP_MS));
+  setInterval(runExtraCardSweep, EXTRA_CARD_SWEEP_MS);
   // Check #4 + startup catch-up: settle anything paid while we were down or the webhook was lost.
   if (RECONCILE_INTERVAL_MS > 0) {
     setTimeout(() => reconcileOutstandingPayments('startup').catch(e => console.error('[payment:reconcile:error]', e.message || e)), Math.min(5000, RECONCILE_INTERVAL_MS));

