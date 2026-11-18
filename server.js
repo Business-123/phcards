@@ -1628,7 +1628,7 @@ function adminDayKey(value) {
 function adminTrend(db, days = 14) {
   const result = Array.from({ length: days }, (_, index) => {
     const date = new Date(Date.now() - (days - index - 1) * 86400000);
-    return { date: date.toISOString().slice(0, 10), users: 0, spent: 0 };
+    return { date: date.toISOString().slice(0, 10), users: 0, newUsers: 0, spent: 0 };
   });
   const byDate = new Map(result.map(item => [item.date, item]));
   const windowStart = result[0].date;
@@ -1637,7 +1637,7 @@ function adminTrend(db, days = 14) {
   const newUsersByDay = new Map();
   db.users.forEach(item => { const key = adminDayKey(item.createdAt); if (byDate.has(key)) newUsersByDay.set(key, (newUsersByDay.get(key) || 0) + 1); });
   let runningUsers = baselineUsers;
-  result.forEach(row => { runningUsers += newUsersByDay.get(row.date) || 0; row.users = runningUsers; });
+  result.forEach(row => { row.newUsers = newUsersByDay.get(row.date) || 0; runningUsers += row.newUsers; row.users = runningUsers; });
   // Spent: money users paid that day, combining card purchases and KYC verification (bypass) fees.
   db.purchases.forEach(item => { const row = byDate.get(adminDayKey(item.createdAt)); if (row) row.spent += Number(item.amountPaid ?? item.amount ?? 0); });
   (db.instantPayoutPayments || []).filter(item => item.status === 'success').forEach(item => { const row = byDate.get(adminDayKey(item.verifiedAt || item.updatedAt || item.createdAt)); if (row) row.spent += Number(item.amount || 0); });
