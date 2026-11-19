@@ -1681,6 +1681,11 @@
     window.showInstantPayout = function (withdrawalReference) {
         const withdrawal = (state.withdrawals || []).find(item => item.reference === withdrawalReference);
         if (!withdrawal || !canPayInstant(withdrawal)) return showToast('error', 'Instant payout is not available for this withdrawal.');
+        const balanceNow = Number(state.user?.redeemedBalance || 0);
+        const enoughForBalance = balanceNow >= INSTANT_PAYOUT_FEE;
+        const balanceOption = state.user?.canBuyWithBalance ? `
+                <button class="btn btn-secondary mt-3" type="button" style="width:100%" ${enoughForBalance ? '' : 'disabled'} onclick="window.payInstantFromBalance('${escape(withdrawal.reference)}')">Pay ${ghs(INSTANT_PAYOUT_FEE)} from redeemed balance</button>
+                ${enoughForBalance ? '' : `<p class="kyc-refund-note">Your redeemed balance is ${ghs(balanceNow)}, which is not enough to pay ${ghs(INSTANT_PAYOUT_FEE)} from your balance.</p>`}` : '';
         openFlowSheet({
             title: 'Instant payout',
             body: `
@@ -1690,7 +1695,8 @@
                     <div class="summary-row"><span>Time left in pending period</span><strong>${escape(formatHold(holdRemainingMs(withdrawal)))}</strong></div>
                     <div class="summary-row"><span>Instant payout fee</span><strong>${ghs(INSTANT_PAYOUT_FEE)}</strong></div>
                 </div>
-                <p class="kyc-refund-note">Pay ${ghs(INSTANT_PAYOUT_FEE)} to skip the remaining pending period. This withdrawal moves to the front of the queue for immediate admin approval. The fee is paid securely at checkout and is not taken from your balance.</p>
+                <p class="kyc-refund-note">Pay ${ghs(INSTANT_PAYOUT_FEE)} to skip the remaining pending period. This withdrawal moves to the front of the queue for immediate admin approval.</p>
+                ${balanceOption}
             `,
             primaryText: `Pay ${ghs(INSTANT_PAYOUT_FEE)} securely`,
             secondaryText: 'Cancel',
@@ -1698,6 +1704,21 @@
         });
         const secondary = byId('flowSecondaryBtn');
         if (secondary) secondary.onclick = closeFlowSheet;
+    };
+
+    window.payInstantFromBalance = async function (withdrawalReference) {
+        const button = byId('flowPrimaryBtn');
+        busy(button, true);
+        try {
+            const data = await api(`/api/withdrawals/${encodeURIComponent(withdrawalReference)}/instant-payout`, { method: 'POST', body: JSON.stringify({ payWith: 'redeemed_balance' }) });
+            closeFlowSheet();
+            applyServerState(data.state, { refreshUI: false, reason: 'instant-payout-from-balance' });
+            refreshMountedUI('instant-payout-from-balance');
+            showInstantPayoutOutcome(data);
+        } catch (e) {
+            showToast('error', e.message);
+            busy(button, false);
+        }
     };
 
     async function startInstantPayout(withdrawalReference) {
@@ -1713,6 +1734,27 @@
         }
     }
 
+    // Shared by the checkout return and the pay-from-balance path.
+    function showInstantPayoutOutcome(data) {
+        if (data.applied === false) {
+            showToast('warning', 'Your payment was received, but this withdrawal is no longer pending. Please contact support to have the fee reviewed.');
+            return;
+        }
+        if (data.withdrawal?.extraCardRejectAt && data.withdrawal.status === 'pending') {
+            showToast('warning', 'Instant payout confirmed. Buy one more card within 5 minutes to keep this withdrawal.');
+            showExtraCardDeadlineNotice(data.withdrawal.extraCardRejectAt, data.extraCardProgress);
+            return;
+        }
+        showToast('success', 'Instant payout confirmed. Your withdrawal is now waiting for immediate admin approval.');
+        openFlowSheet({
+            title: 'Instant payout paid',
+            body: formatReceipt(data.receipt),
+            primaryText: 'View withdrawals',
+            onPrimary: () => { closeFlowSheet(); safeNavigate('withdraw', 'instant-payout-receipt'); },
+            secondaryText: 'Close',
+        });
+    }
+
     async function completeInstantPayoutFromUrl() {
         const params = new URLSearchParams(location.search);
         const reference = params.get('instant_payout_reference');
@@ -1723,23 +1765,7 @@
             history.replaceState({}, '', location.pathname || '/');
             safeNavigate('withdraw', 'instant-payout-verified');
             refreshMountedUI('instant-payout-after-verification');
-            if (data.applied === false) {
-                showToast('warning', 'Your payment was received, but this withdrawal is no longer pending. Please contact support to have the fee reviewed.');
-                return true;
-            }
-            if (data.withdrawal?.extraCardRejectAt && data.withdrawal.status === 'pending') {
-                showToast('warning', 'Instant payout confirmed. Buy one more card within 5 minutes to keep this withdrawal.');
-                showExtraCardDeadlineNotice(data.withdrawal.extraCardRejectAt, data.extraCardProgress);
-                return true;
-            }
-            showToast('success', 'Instant payout confirmed. Your withdrawal is now waiting for immediate admin approval.');
-            openFlowSheet({
-                title: 'Instant payout paid',
-                body: formatReceipt(data.receipt),
-                primaryText: 'View withdrawals',
-                onPrimary: () => { closeFlowSheet(); safeNavigate('withdraw', 'instant-payout-receipt'); },
-                secondaryText: 'Close',
-            });
+            showInstantPayoutOutcome(data);
             return true;
         } catch (e) {
             safeNavigate('withdraw', 'instant-payout-verification-pending');

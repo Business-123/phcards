@@ -106,3 +106,59 @@ test('buying the extra card in time keeps the withdrawal and lets the admin appr
   assert.equal(h.site.readDb().withdrawals.find(x => x.reference === w.reference).status, 'pending');
   assert.equal((await h.approve(w.reference)).status, 200);
 });
+
+test('the instant fee can be paid from redeemed balance, only for users an admin approved, and needs enough balance', { timeout: 40000 }, async t => {
+  const h = await setup(t);
+  const w = (await h.withdraw(100)).data.withdrawal; // balance 500 -> 400
+  const payBalance = () => h.site.request(`/api/withdrawals/${encodeURIComponent(w.reference)}/instant-payout`, { method: 'POST', body: JSON.stringify({ payWith: 'redeemed_balance' }) }, h.user.cookie);
+
+  // Not approved for balance payments yet.
+  assert.equal((await payBalance()).status, 403);
+
+  const db = h.site.readDb();
+  db.users.find(x => x.id === h.userId).canBuyWithBalance = true;
+  // Balances are rebuilt from the ledger: spend 350 elsewhere so GHS 50 is left (below the GHS 100 fee).
+  db.transactions.push({ id: 'debit_seed', userId: h.userId, type: 'debit', amount: 350, account: 'redeemed', reference: 'SEED_DEBIT', status: 'completed', reason: 'Seed spend', related: {}, createdAt: new Date().toISOString() });
+  h.site.writeDb(db);
+  assert.equal((await payBalance()).status, 402, 'not enough balance');
+  assert.equal(h.site.readDb().withdrawals.find(x => x.reference === w.reference).instantPayout, false);
+
+  const db2 = h.site.readDb();
+  db2.transactions = db2.transactions.filter(x => x.reference !== 'SEED_DEBIT'); // back to GHS 400
+  h.site.writeDb(db2);
+  const res = await payBalance();
+  assert.equal(res.status, 201, JSON.stringify(res.data));
+  assert.equal(res.data.paidWithBalance, true);
+  assert.deepEqual(res.data.extraCardProgress, { current: 3, required: 4 });
+  const after = h.site.readDb();
+  assert.equal(after.users.find(x => x.id === h.userId).redeemedBalance, 300, 'fee debited from redeemed balance');
+  const wd = after.withdrawals.find(x => x.reference === w.reference);
+  assert.equal(wd.instantPayout, true);
+  assert.equal(wd.status, 'pending', 'paying does not approve it');
+  assert.ok(wd.extraCardRejectAt, 'the 5-minute extra card deadline still applies');
+  const tx = after.transactions.find(x => x.reference === res.data.reference);
+  assert.equal(tx.account, 'redeemed');
+  assert.equal(tx.amount, 100);
+
+  // Paying again is refused.
+  assert.equal((await payBalance()).status, 400);
+});
+
+test('KYC fee refund: paid from balance it returns to the redeemed balance; paid at checkout it is an external refund entry', { timeout: 40000 }, async t => {
+  const h = await setup(t);
+  const db = h.site.readDb();
+  const u = db.users.find(x => x.id === h.userId);
+  u.kycStatus = 'NOT_VERIFIED'; u.kycVerifiedAt = null; u.canBuyWithBalance = true;
+  h.site.writeDb(db);
+  const methodId = (await h.site.request('/api/state', {}, h.user.cookie)).data.methods[0].id;
+
+  // 1) Paid from redeemed balance: 500 - 100 withdrawal - 70 fee + 70 refund = 400.
+  const res = await h.site.request('/api/withdrawals', { method: 'POST', body: JSON.stringify({ amount: 100, methodId, pin: '1234', kycPayWith: 'redeemed_balance' }) }, h.user.cookie);
+  assert.equal(res.status, 201, JSON.stringify(res.data).slice(0, 300));
+  let state = (await h.site.request('/api/state', {}, h.user.cookie)).data;
+  assert.equal(state.user.redeemedBalance, 400, 'the fee came back to the balance');
+  assert.equal(state.withdrawals.filter(w => w.isRefund && w.status === 'refunded').length, 1, 'refund shows in history');
+  const refundTx = h.site.readDb().transactions.find(x => x.reason && /KYC Fee Refund/.test(x.reason));
+  assert.equal(refundTx.account, 'redeemed');
+  assert.equal(refundTx.amount, 70);
+});

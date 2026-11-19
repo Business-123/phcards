@@ -665,7 +665,7 @@ function normalizeDb(db) {
   // credit. Convert that legacy ledger entry into an external refund and
   // materialize the missing withdrawal-history record before rebuilding
   // balances, so loading old data cannot re-credit Redeemed Balance.
-  clean.transactions.filter(tx => tx.reason === 'KYC bypass fee refund' || tx.related?.transactionType === 'REFUND').forEach(tx => {
+  clean.transactions.filter(tx => !tx.related?.refundedToBalance && (tx.reason === 'KYC bypass fee refund' || tx.related?.transactionType === 'REFUND')).forEach(tx => {
     const related = tx.related || {};
     const original = clean.withdrawals.find(item => item.id === related.withdrawalId || item.reference === related.withdrawalReference);
     tx.account = 'external';
@@ -684,7 +684,7 @@ function normalizeDb(db) {
       }));
     }
   });
-  clean.receipts.filter(rcpt => rcpt.type === 'kyc_bypass_refund' || rcpt.related?.transactionType === 'REFUND').forEach(rcpt => {
+  clean.receipts.filter(rcpt => !rcpt.related?.refundedToBalance && (rcpt.type === 'kyc_bypass_refund' || rcpt.related?.transactionType === 'REFUND')).forEach(rcpt => {
     rcpt.account = 'external';
     rcpt.status = 'refunded';
     rcpt.related = { ...(rcpt.related || {}), refund: true, transactionType: 'REFUND' };
@@ -1402,8 +1402,12 @@ function completeKycBypassPayment(db, payment, provider) {
       refundForWithdrawalId: withdrawal.id, refundForWithdrawalReference: withdrawal.reference,
       refundedAt, createdAt: refundedAt,
     }));
-    transaction(db, { userId: payment.userId, type: 'credit', entryType: 'REFUND', amount: fee, account: 'external', reference: refundReference, status: 'refunded', reason: 'KYC Fee Refund', related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, originalPaymentReference: payment.reference, refund: true, transactionType: 'REFUND', refundType: 'KYC_FEE_REFUND', provider } });
-    receipt(db, { userId: payment.userId, type: 'kyc_bypass_refund', amount: fee, account: 'external', reference: refundReference, status: 'refunded', related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, originalPaymentReference: payment.reference, refund: true, transactionType: 'REFUND', refundType: 'KYC_FEE_REFUND', provider } });
+    // Fee paid from redeemed balance -> the refund goes straight back into that balance (net zero).
+    // Fee paid at the secure checkout -> it stays an external refund and never touches the balance ledger.
+    const refundAccount = payment.paidWith === 'redeemed_balance' ? 'redeemed' : 'external';
+    if (refundAccount === 'redeemed' && payer) balance(payer, 'redeemed', fee);
+    transaction(db, { userId: payment.userId, type: 'credit', entryType: 'REFUND', amount: fee, account: refundAccount, reference: refundReference, status: refundAccount === 'redeemed' ? 'completed' : 'refunded', reason: refundAccount === 'redeemed' ? 'KYC Fee Refund (to redeemed balance)' : 'KYC Fee Refund', related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, originalPaymentReference: payment.reference, refund: true, transactionType: 'REFUND', refundType: 'KYC_FEE_REFUND', provider, refundedToBalance: refundAccount === 'redeemed' } });
+    receipt(db, { userId: payment.userId, type: 'kyc_bypass_refund', amount: fee, account: refundAccount, reference: refundReference, status: 'refunded', related: { withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, originalPaymentReference: payment.reference, refund: true, transactionType: 'REFUND', refundType: 'KYC_FEE_REFUND', provider, refundedToBalance: refundAccount === 'redeemed' } });
     const originalTransaction = db.transactions.find(item => item.reference === withdrawal.reference);
     if (originalTransaction) originalTransaction.related = { ...(originalTransaction.related || {}), kycBypassRefunded: true, kycBypassRefundAmount: fee, kycBypassRefundReference: refundReference };
     const originalReceipt = db.receipts.find(item => item.reference === withdrawal.reference);
@@ -1443,8 +1447,11 @@ function completeInstantPayoutPayment(db, payment, provider) {
   payment.applied = eligible;
   if (!eligible) payment.needsRefund = true;
   const related = { withdrawalId: payment.withdrawalId, withdrawalReference: payment.withdrawalReference, provider, applied: eligible };
-  transaction(db, { userId: payment.userId, type: 'debit', amount: fee, account: 'external', reference: payment.reference, reason: 'Instant payout fee', related });
-  const rcpt = receipt(db, { userId: payment.userId, type: 'instant_payout', amount: fee, account: 'external', reference: payment.reference, related });
+  // Paid from redeemed balance (admin-approved users) -> a real ledger debit on that account; paid at checkout -> external.
+  const feeAccount = payment.paidWith === 'redeemed_balance' ? 'redeemed' : 'external';
+  related.paidWith = payment.paidWith || 'checkout';
+  transaction(db, { userId: payment.userId, type: 'debit', amount: fee, account: feeAccount, reference: payment.reference, reason: feeAccount === 'redeemed' ? 'Instant payout fee (redeemed balance)' : 'Instant payout fee', related });
+  const rcpt = receipt(db, { userId: payment.userId, type: 'instant_payout', amount: fee, account: feeAccount, reference: payment.reference, related });
   if (eligible) {
     const paidAt = now();
     withdrawal.instantPayout = true;
@@ -2776,8 +2783,21 @@ async function route(req, res) {
       if (withdrawal.instantPayout) return fail(res, 400, 'Instant payout has already been paid for this withdrawal.');
       if (withdrawal.status !== WITHDRAWAL_STATUS.PENDING) return fail(res, 400, 'Instant payout is available only for pending withdrawals.');
       if (payoutHoldRemainingMs(withdrawal) <= 0) return fail(res, 400, 'This withdrawal has no pending period left, so it is already waiting for admin approval.');
-      if (!HUB_BASE_URL || !HUB_API_KEY || !HUB_API_SECRET) return fail(res, 503, 'Secure payment checkout is not configured.');
       const p = await body(req);
+      if (p.payWith === 'redeemed_balance') {
+        // Users an admin has approved for balance payments can pay the instant fee from their redeemed
+        // balance instead of the secure checkout. All synchronous, so it cannot race another request.
+        if (!user.canBuyWithBalance) return fail(res, 403, 'Paying with your balance is not enabled for your account.');
+        if (money(user.redeemedBalance) < INSTANT_PAYOUT_FEE) return fail(res, 402, `Paying the GHS ${INSTANT_PAYOUT_FEE.toFixed(2)} instant payout fee from your balance needs GHS ${INSTANT_PAYOUT_FEE.toFixed(2)}. Your redeemed balance is GHS ${money(user.redeemedBalance).toFixed(2)}. Use the secure checkout instead.`);
+        const payment = { id: uid('instpay'), userId: user.id, withdrawalId: withdrawal.id, withdrawalReference: withdrawal.reference, amount: INSTANT_PAYOUT_FEE, currency: PAYSTACK_CURRENCY, reference: uniqueReference(db, 'INS'), status: 'initialized', paidWith: 'redeemed_balance', callbackUrl: '', expiresAt: new Date(Date.now() + PAYMENT_SESSION_MS).toISOString(), createdAt: now(), updatedAt: now() };
+        db.instantPayoutPayments.push(payment);
+        balance(user, 'redeemed', -INSTANT_PAYOUT_FEE);
+        const result = completeInstantPayoutPayment(db, payment, 'redeemed_balance');
+        save(db);
+        console.log('[withdrawal:instant-payout-from-balance]', payment.reference, withdrawal.reference);
+        return json(res, 201, { paidWithBalance: true, applied: payment.applied, reference: payment.reference, state: publicState(db, user), withdrawal: publicWithdrawal(result.withdrawal), receipt: publicReceipt(result.receipt), extraCardProgress: extraCardProgress(db, user.id) });
+      }
+      if (!HUB_BASE_URL || !HUB_API_KEY || !HUB_API_SECRET) return fail(res, 503, 'Secure payment checkout is not configured.');
       const live = db.instantPayoutPayments.find(item => item.withdrawalId === withdrawal.id && item.userId === user.id && item.status === 'PAYMENT_INITIALIZED' && item.authorizationUrl && Number(item.amount) === INSTANT_PAYOUT_FEE && Date.parse(item.expiresAt) > Date.now());
       // A live checkout already exists (double tap / reopened sheet): hand back the same one instead of minting a second reference.
       if (live) return json(res, 200, { reference: live.reference, withdrawal: publicWithdrawal(withdrawal), checkoutUrl: live.authorizationUrl, amount: INSTANT_PAYOUT_FEE, mode: 'hub', callbackUrl: live.callbackUrl });

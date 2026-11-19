@@ -78,11 +78,11 @@ test('approved users can pay the KYC fee from redeemed balance; others cannot', 
   assert.equal(paid.response.status, 201);
   assert.equal(paid.data.paidWithBalance, true);
   assert.equal(paid.data.withdrawal.status, 'pending');
-  assert.equal(paid.data.state.user.redeemedBalance, 130, '300 - 100 withdrawal - 70 KYC fee');
+  assert.equal(paid.data.state.user.redeemedBalance, 200, '300 - 100 withdrawal; the 70 KYC fee is refunded back into the balance');
   assert.equal(paid.data.state.user.kycStatus, 'VERIFIED');
 
   const state = (await asUser('/api/state')).data;
-  assert.equal(state.user.redeemedBalance, 130, 'ledger rebuild agrees with the live balance');
+  assert.equal(state.user.redeemedBalance, 200, 'ledger rebuild agrees with the live balance');
   const feeTx = state.transactions.find(item => item.reason === 'KYC bypass fee (redeemed balance)');
   assert.ok(feeTx && feeTx.account === 'redeemed' && feeTx.amount === 70);
   assert.ok(state.withdrawals.some(item => item.isRefund && item.amount === 70), 'fee refund is recorded as a separate entry');
