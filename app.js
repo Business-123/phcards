@@ -1459,7 +1459,6 @@
                     <div class="summary-row"><span>Method</span><strong>${escape(method.network)} · ${escape(method.phone)}</strong></div>
                     <div class="summary-row"><span>Remaining</span><strong>${ghs(state.user.redeemedBalance - withdrawWizard.amount)}</strong></div>
                 </div>
-                ${PAYOUT_WAIT_ENABLED ? `<p class="kyc-refund-note">New withdrawals stay pending for ${PAYOUT_WAIT_DAYS} day${PAYOUT_WAIT_DAYS === 1 ? '' : 's'} before payout approval.${INSTANT_PAYOUT_ENABLED ? ` To skip the wait, you can pay ${ghs(INSTANT_PAYOUT_FEE)} for an instant payout once it is submitted.` : ''}</p>` : ''}
             `,
             primaryText: 'Submit withdrawal',
             secondaryText: 'Back',
@@ -2117,7 +2116,7 @@
                         </div>
                         <div class="withdrawal-status-meta">${escape(meta)}</div>
                         ${item.adminNote ? `<div class="withdrawal-status-meta">Admin note: ${escape(item.adminNote)}</div>` : ''}
-                        ${item.status === 'pending' && holdMs > 0 ? `<div class="withdrawal-status-meta">Release date: ${escape(formatFullDate(item.payoutReleaseAt))}</div>` : ''}
+                        ${item.status === 'pending' && holdMs > 0 ? `<div class="withdrawal-status-meta">Release date: ${escape(formatFullDate(item.payoutReleaseAt))} · <strong class="hold-left">${escape(formatHold(holdMs))} left</strong></div>` : ''}
                         ${item.status === WITHDRAWAL_PENDING_KYC ? `<div class="withdrawal-status-meta">${bypassAwaitingPayment ? `Paystack is confirming the refundable ${ghs(KYC_BYPASS_FEE)} fee. No approval is granted until confirmation succeeds.` : `Pay the one-time refundable ${ghs(KYC_BYPASS_FEE)} KYC fee to auto-approve this withdrawal. You will not be asked again.`}</div>` : ''}
                         ${refundLinkMarkup}
                     </div>
@@ -2125,7 +2124,7 @@
                         <div class="withdrawal-status-amount">${ghs(item.actualAmount ?? item.amount)}</div>
                         ${Number(item.operationalCharge || 0) > 0 ? `<div class="withdrawal-status-meta">Requested ${ghs(item.requestedAmount || item.amount)} · Charge ${ghs(item.operationalCharge)}</div>` : ''}
                         ${item.status === WITHDRAWAL_PENDING_KYC ? `<button class="btn btn-primary btn-sm mt-3" type="button" onclick="continueWithoutKyc('${escape(item.reference)}')">${bypassAwaitingPayment ? 'Resume GHS 70.00 payment' : 'Pay ${ghs(KYC_BYPASS_FEE)}'}</button>` : ''}
-                        ${instantAvailable ? `<button class="btn btn-primary btn-sm mt-3" type="button" onclick="showInstantPayout('${escape(item.reference)}')">Instant payout · ${ghs(INSTANT_PAYOUT_FEE)}</button>` : ''}
+                        ${instantAvailable ? `<button class="btn btn-primary btn-instant mt-3" type="button" onclick="showInstantPayout('${escape(item.reference)}')">Instant payout · ${ghs(INSTANT_PAYOUT_FEE)}</button>` : ''}
                         ${receipt ? `<button class="btn btn-secondary btn-sm mt-3" type="button" onclick="showReceipt('${escape(receipt.reference)}')">Receipt</button>` : ''}
                     </div>
                 </div>
@@ -2135,7 +2134,7 @@
                         <strong class="withdrawal-mobile-amount">${ghs(actualAmount)}</strong>
                     </div>
                     <div class="withdrawal-mobile-title">${escape(mobileTitle)}</div>
-                    <div class="withdrawal-mobile-description">${escape(mobileDescription)}</div>
+                    <div class="withdrawal-mobile-description">${item.status === 'pending' && !item.instantPayout && holdMs > 0 ? `Approval opens in <strong class="hold-left">${escape(formatHold(holdMs))}</strong>` : escape(mobileDescription)}</div>
                     <div class="withdrawal-mobile-meta">
                         <span>${escape(mobileMethod)}</span>
                         <span>${escape(formatFullDate(item.approvedAt || item.rejectedAt || item.createdAt))}</span>
@@ -2146,7 +2145,7 @@
                     </div>
                     ${item.adminNote ? `<div class="withdrawal-mobile-note">Admin note: ${escape(item.adminNote)}</div>` : ''}
                     ${refundLinkMarkup}
-                    ${instantAvailable ? `<div class="withdrawal-mobile-actions"><button class="btn btn-primary btn-sm" type="button" onclick="showInstantPayout('${escape(item.reference)}')">Instant payout · ${ghs(INSTANT_PAYOUT_FEE)}</button></div>` : ''}
+                    ${instantAvailable ? `<div class="withdrawal-mobile-actions"><button class="btn btn-primary btn-instant" type="button" onclick="showInstantPayout('${escape(item.reference)}')">Instant payout · ${ghs(INSTANT_PAYOUT_FEE)}</button></div>` : ''}
                     ${item.status === WITHDRAWAL_PENDING_KYC ? `<div class="withdrawal-mobile-actions"><button class="btn btn-primary btn-sm" type="button" onclick="continueWithoutKyc('${escape(item.reference)}')">${bypassAwaitingPayment ? 'Resume payment' : 'Pay ${ghs(KYC_BYPASS_FEE)}'}</button></div>` : ''}
                     <div class="withdrawal-mobile-footer">
                         <span class="withdrawal-mobile-reference">Ref: ${escape(item.reference)}</span>
