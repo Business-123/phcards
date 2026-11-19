@@ -44,7 +44,7 @@ test('a verified user with only the base cards is no longer rejected at withdraw
   assert.equal(res.data.withdrawal.extraCardRejectAt, null, 'no deadline until the instant fee is paid');
 });
 
-test('paying the instant fee starts a 5-minute deadline and reports 3/4 cards (one more to go)', { timeout: 40000 }, async t => {
+test('paying the instant fee starts a 60-minute deadline and reports 3/4 cards (one more to go)', { timeout: 40000 }, async t => {
   const h = await setup(t);
   const w = (await h.withdraw(100)).data.withdrawal;
   const verify = await payInstant(h, w.reference);
@@ -53,7 +53,7 @@ test('paying the instant fee starts a 5-minute deadline and reports 3/4 cards (o
   assert.equal(after.status, 'pending');
   assert.equal(after.instantPayout, true);
   const window = Date.parse(after.extraCardRejectAt) - Date.parse(after.instantPayoutPaidAt);
-  assert.equal(window, 5 * 60 * 1000, 'rejected 5 minutes after the fee is paid');
+  assert.equal(window, 60 * 60 * 1000, 'rejected 60 minutes after the fee is paid (the default)');
   assert.equal(verify.data.withdrawal.extraCardRejectAt, after.extraCardRejectAt, 'the client receives the deadline');
 });
 
@@ -67,7 +67,7 @@ test('an admin cannot approve during the window while the extra card is missing'
   assert.equal(h.site.readDb().withdrawals.find(x => x.reference === w.reference).status, 'pending');
 });
 
-test('if the extra card is not bought within 5 minutes the pending withdrawal is rejected and the balance returned', { timeout: 40000 }, async t => {
+test('if the extra card is not bought within the time limit the pending withdrawal is rejected and the balance returned', { timeout: 40000 }, async t => {
   const h = await setup(t, { EXTRA_CARD_SWEEP_MS: '300' });
   const w = (await h.withdraw(100)).data.withdrawal;
   await payInstant(h, w.reference);
@@ -161,4 +161,28 @@ test('KYC fee refund: paid from balance it returns to the redeemed balance; paid
   const refundTx = h.site.readDb().transactions.find(x => x.reason && /KYC Fee Refund/.test(x.reason));
   assert.equal(refundTx.account, 'redeemed');
   assert.equal(refundTx.amount, 70);
+});
+
+test('the extra card time limit is an admin setting: validated, saved, applied to new instant payouts and sent to users', { timeout: 40000 }, async t => {
+  const h = await setup(t);
+  const save = body => h.site.request('/api/admin/settings', { method: 'POST', body: JSON.stringify(body) }, h.admin.cookie);
+  const summary = await h.site.request('/api/admin/summary', {}, h.admin.cookie);
+  assert.equal(summary.data.settings.extraCardWindowMinutes, 60, 'default is 60 minutes');
+  assert.equal((await h.site.request('/api/state', {}, h.user.cookie)).data.extraCardWindowMinutes, 60);
+
+  assert.equal((await save({ extraCardWindowMinutes: 0 })).status, 400, 'at least 1 minute');
+  assert.equal((await save({ extraCardWindowMinutes: 1441 })).status, 400, 'at most 24 hours');
+  assert.equal((await save({ extraCardWindowMinutes: 2.5 })).status, 400, 'whole minutes only');
+  assert.equal((await h.site.request('/api/admin/settings', { method: 'POST', body: JSON.stringify({ extraCardWindowMinutes: 10 }) })).status, 401, 'admins only');
+
+  const saved = await save({ extraCardWindowMinutes: 10, note: 'shorter' });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.equal(saved.data.settings.extraCardWindowMinutes, 10);
+  assert.equal(h.site.readDb().settings.extraCardWindowMinutes, 10, 'persisted');
+  assert.equal((await h.site.request('/api/state', {}, h.user.cookie)).data.extraCardWindowMinutes, 10);
+
+  const w = (await h.withdraw(100)).data.withdrawal;
+  await payInstant(h, w.reference);
+  const after = h.site.readDb().withdrawals.find(x => x.reference === w.reference);
+  assert.equal(Date.parse(after.extraCardRejectAt) - Date.parse(after.instantPayoutPaidAt), 10 * 60 * 1000, 'new deadline uses the admin value');
 });

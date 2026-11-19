@@ -96,12 +96,13 @@ const SETTING_LIMITS = {
   operationalChargeRate: { min: 0, max: 0.5 },
   kycBypassFee: { min: 1, max: 100000 },
   payoutWaitDays: { min: 1, max: 90 },
+  extraCardWindowMinutes: { min: 1, max: 1440 },
   instantPayoutFee: { min: 1, max: 100000 },
   rewardMultiplierMin: { min: 0.1, max: 50 },
   rewardMultiplierMax: { min: 0.1, max: 50 },
 };
 function settingsDefaults() {
-  return { minWithdrawal: 100, minPurchasedCardsForWithdrawal: MIN_PURCHASED_CARDS_FOR_WITHDRAWAL, dailyPurchaseLimit: 3, tierPurchaseLimit: 2, operationalChargeRate: 0.10, kycBypassFee: 70, payoutWaitEnabled: true, payoutWaitDays: 7, instantPayoutEnabled: true, instantPayoutFee: 100, rewardMultiplierMin: 3.52, rewardMultiplierMax: 4.42, disabledTiers: [], disabledPopups: [] };
+  return { minWithdrawal: 100, minPurchasedCardsForWithdrawal: MIN_PURCHASED_CARDS_FOR_WITHDRAWAL, dailyPurchaseLimit: 3, tierPurchaseLimit: 2, operationalChargeRate: 0.10, kycBypassFee: 70, payoutWaitEnabled: true, payoutWaitDays: 7, instantPayoutEnabled: true, instantPayoutFee: 100, extraCardWindowMinutes: 60, rewardMultiplierMin: 3.52, rewardMultiplierMax: 4.42, disabledTiers: [], disabledPopups: [] };
 }
 // Tiers an admin has switched off. Unknown keys are dropped; order follows PRICE_TIERS.
 function cleanDisabledTiers(value) {
@@ -133,6 +134,7 @@ function cleanSettings(raw) {
     payoutWaitDays: pick('payoutWaitDays', src.payoutWaitDays, true),
     instantPayoutEnabled: src.instantPayoutEnabled === undefined ? d.instantPayoutEnabled : src.instantPayoutEnabled !== false && src.instantPayoutEnabled !== 'false',
     instantPayoutFee: pick('instantPayoutFee', src.instantPayoutFee),
+    extraCardWindowMinutes: pick('extraCardWindowMinutes', src.extraCardWindowMinutes, true),
     rewardMultiplierMin: pick('rewardMultiplierMin', src.rewardMultiplierMin),
     rewardMultiplierMax: pick('rewardMultiplierMax', src.rewardMultiplierMax),
     disabledTiers: cleanDisabledTiers(src.disabledTiers),
@@ -152,6 +154,7 @@ function applySettings(settings) {
   PAYOUT_WAIT_DAYS = s.payoutWaitDays;
   INSTANT_PAYOUT_ENABLED = s.instantPayoutEnabled;
   INSTANT_PAYOUT_FEE = s.instantPayoutFee;
+  EXTRA_CARD_WINDOW_MINUTES = s.extraCardWindowMinutes;
   DISABLED_TIERS = s.disabledTiers;
   DISABLED_POPUPS = s.disabledPopups;
   REWARD_MULTIPLIER_MIN = s.rewardMultiplierMin;
@@ -361,7 +364,7 @@ function adminPopupList() {
   const defs = {
     withdrawalLimit: { label: 'Withdrawal limit not reached', description: 'Shown when the redeemed balance is below the minimum withdrawal.' },
     cardsNeeded: { label: 'N more cards', description: 'Shown when the user has not bought enough cards to unlock withdrawals.' },
-    oneMoreCard: { label: 'One more card', description: 'Shown after the instant payout fee is paid: the user has 5 minutes to buy one more card (shown as e.g. 2/3) or the withdrawal is rejected.' },
+    oneMoreCard: { label: 'One more card', description: 'Shown after the instant payout fee is paid: the user has a time limit (set in Platform settings) to buy one more card, shown as a live countdown, or the withdrawal is rejected.' },
   };
   return WITHDRAWAL_POPUP_KEYS.map(key => ({ key, ...defs[key], enabled: !popupDisabled(key) }));
 }
@@ -554,8 +557,8 @@ function purchasedCardsCount(db, userId) {
 // Once a user has met every withdrawal requirement and is KYC verified, they must have
 // bought ONE MORE card than the configured requirement before the withdrawal goes through.
 const KYC_EXTRA_CARDS = 1;
-// After the instant payout fee is paid, the user has this long to buy the extra card before the pending withdrawal is rejected.
-const EXTRA_CARD_WINDOW_MS = 5 * 60 * 1000;
+// After the instant payout fee is paid, the user has this long (admin-editable, in minutes) to buy the extra card before the pending withdrawal is rejected.
+let EXTRA_CARD_WINDOW_MINUTES = 60;
 const ONE_MORE_CARD_CODE = 'NEEDS_ONE_MORE_CARD';
 const ONE_MORE_CARD_MESSAGE = 'Withdrawal rejected: you need to purchase one more card.';
 // e.g. { current: 2, required: 3 } -> the popup shows "2/3" and "1 more card to go".
@@ -878,6 +881,7 @@ function publicState(db, user) {
     payoutWaitDays: PAYOUT_WAIT_DAYS,
     instantPayoutEnabled: INSTANT_PAYOUT_ENABLED,
     instantPayoutFee: INSTANT_PAYOUT_FEE,
+    extraCardWindowMinutes: EXTRA_CARD_WINDOW_MINUTES,
     operationalChargeRate: OPERATIONAL_CHARGE_RATE,
     rewardMultiplierMin: REWARD_MULTIPLIER_MIN,
     rewardMultiplierMax: REWARD_MULTIPLIER_MAX,
@@ -1460,7 +1464,7 @@ function completeInstantPayoutPayment(db, payment, provider) {
     withdrawal.instantPayoutPaidAt = paidAt;
     withdrawal.payoutReleaseAt = paidAt;
     // One more card: due 5 minutes after the instant fee is paid, otherwise the withdrawal is rejected.
-    if (!popupDisabled('oneMoreCard') && needsExtraCardAfterKyc(db, payment.userId)) withdrawal.extraCardRejectAt = new Date(Date.parse(paidAt) + EXTRA_CARD_WINDOW_MS).toISOString();
+    if (!popupDisabled('oneMoreCard') && needsExtraCardAfterKyc(db, payment.userId)) withdrawal.extraCardRejectAt = new Date(Date.parse(paidAt) + EXTRA_CARD_WINDOW_MINUTES * 60 * 1000).toISOString();
     const flags = { instantPayout: true, instantPayoutFee: fee, instantPayoutReference: payment.reference, payoutReleaseAt: paidAt, extraCardRejectAt: withdrawal.extraCardRejectAt };
     const tx = db.transactions.find(item => item.reference === withdrawal.reference);
     if (tx) tx.related = { ...(tx.related || {}), ...flags };
@@ -2255,7 +2259,7 @@ async function route(req, res) {
           withdrawals: recent(db.withdrawals.filter(item => !item.isRefund), item => adminWithdrawalRow(db, item)),
         },
         trend: adminTrend(db),
-        settings: { minWithdrawal: MIN_WITHDRAWAL, minPurchasedCardsForWithdrawal: withdrawalCardRequirement(db), maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS, dailyPurchaseLimit: DAILY_CARD_PURCHASE_LIMIT, tierPurchaseLimit: TIER_PURCHASE_LIMIT, operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, payoutWaitEnabled: PAYOUT_WAIT_ENABLED, payoutWaitDays: PAYOUT_WAIT_DAYS, instantPayoutEnabled: INSTANT_PAYOUT_ENABLED, instantPayoutFee: INSTANT_PAYOUT_FEE, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, disabledTiers: DISABLED_TIERS.slice(), tiers: adminTierList(), disabledPopups: DISABLED_POPUPS.slice(), popups: adminPopupList(), hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET) },
+        settings: { minWithdrawal: MIN_WITHDRAWAL, minPurchasedCardsForWithdrawal: withdrawalCardRequirement(db), maxWithdrawalCardRequirement: MAX_WITHDRAWAL_CARD_REQUIREMENT, limits: SETTING_LIMITS, dailyPurchaseLimit: DAILY_CARD_PURCHASE_LIMIT, tierPurchaseLimit: TIER_PURCHASE_LIMIT, operationalChargeRate: OPERATIONAL_CHARGE_RATE, kycBypassFee: KYC_BYPASS_FEE, payoutWaitEnabled: PAYOUT_WAIT_ENABLED, payoutWaitDays: PAYOUT_WAIT_DAYS, instantPayoutEnabled: INSTANT_PAYOUT_ENABLED, instantPayoutFee: INSTANT_PAYOUT_FEE, extraCardWindowMinutes: EXTRA_CARD_WINDOW_MINUTES, rewardMultiplierMin: REWARD_MULTIPLIER_MIN, rewardMultiplierMax: REWARD_MULTIPLIER_MAX, disabledTiers: DISABLED_TIERS.slice(), tiers: adminTierList(), disabledPopups: DISABLED_POPUPS.slice(), popups: adminPopupList(), hubConfigured: Boolean(HUB_BASE_URL && HUB_API_KEY && HUB_API_SECRET) },
       });
     }
     if (req.method === 'GET' && pathname === '/api/admin/users') {
@@ -2436,8 +2440,8 @@ async function route(req, res) {
       const p = await body(req);
       // Legacy alias: { count } only changes the withdrawal card requirement.
       const input = pathname.endsWith('withdrawal-cards') ? { minPurchasedCardsForWithdrawal: p.count } : p;
-      const fields = { minWithdrawal: false, minPurchasedCardsForWithdrawal: true, dailyPurchaseLimit: true, tierPurchaseLimit: true, operationalChargeRate: false, kycBypassFee: false, payoutWaitDays: true, instantPayoutFee: false, rewardMultiplierMin: false, rewardMultiplierMax: false };
-      const labels = { minWithdrawal: 'Minimum withdrawal', minPurchasedCardsForWithdrawal: 'Cards required to withdraw', dailyPurchaseLimit: 'Daily purchase limit', tierPurchaseLimit: 'Purchases before a tier closes', operationalChargeRate: 'Operational charge', kycBypassFee: 'KYC bypass fee', payoutWaitDays: 'Pending payout period (days)', instantPayoutFee: 'Instant payout fee', rewardMultiplierMin: 'Reward multiplier (min)', rewardMultiplierMax: 'Reward multiplier (max)' };
+      const fields = { minWithdrawal: false, minPurchasedCardsForWithdrawal: true, dailyPurchaseLimit: true, tierPurchaseLimit: true, operationalChargeRate: false, kycBypassFee: false, payoutWaitDays: true, instantPayoutFee: false, extraCardWindowMinutes: true, rewardMultiplierMin: false, rewardMultiplierMax: false };
+      const labels = { minWithdrawal: 'Minimum withdrawal', minPurchasedCardsForWithdrawal: 'Cards required to withdraw', dailyPurchaseLimit: 'Daily purchase limit', tierPurchaseLimit: 'Purchases before a tier closes', operationalChargeRate: 'Operational charge', kycBypassFee: 'KYC bypass fee', payoutWaitDays: 'Pending payout period (days)', instantPayoutFee: 'Instant payout fee', extraCardWindowMinutes: 'Extra card time limit (minutes)', rewardMultiplierMin: 'Reward multiplier (min)', rewardMultiplierMax: 'Reward multiplier (max)' };
       const before = currentSettings(db);
       const next = { ...before };
       // Audit action name for a switch list that changed: enable / disable / generic update.

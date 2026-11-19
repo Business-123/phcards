@@ -255,11 +255,12 @@
         { key: 'kycBypassFee', label: 'KYC bypass fee', unit: 'GHS', step: '0.01', help: 'One-time refundable fee that verifies a user for good.' },
         { key: 'payoutWaitDays', label: 'Pending payout period', unit: 'days', step: '1', help: 'How long a new withdrawal stays pending before an admin can approve it. Applies to withdrawals submitted from now on.' },
         { key: 'instantPayoutFee', label: 'Instant payout fee', unit: 'GHS', step: '0.01', help: 'What a user pays to skip the pending period on one withdrawal.' },
+        { key: 'extraCardWindowMinutes', label: 'Extra card time limit', unit: 'minutes', step: '1', help: 'After a user pays the instant payout fee they have this long to buy one more card. If they do not, the pending withdrawal is rejected and the balance returned. Users see a live minutes:seconds countdown. Applies to instant payouts paid from now on.' },
         { key: 'rewardMultiplierMin', label: 'Reward multiplier (min)', unit: '×', step: '0.01', help: 'Lowest reward multiplier applied to a card price.' },
         { key: 'rewardMultiplierMax', label: 'Reward multiplier (max)', unit: '×', step: '0.01', help: 'Highest reward multiplier applied to a card price.' },
     ];
     function settingsFormValues(s) {
-        return { minWithdrawal: Number(s.minWithdrawal ?? 100), minPurchasedCardsForWithdrawal: Number(s.minPurchasedCardsForWithdrawal ?? 3), dailyPurchaseLimit: Number(s.dailyPurchaseLimit ?? 3), tierPurchaseLimit: Number(s.tierPurchaseLimit ?? 2), operationalChargePercent: Math.round(Number(s.operationalChargeRate ?? 0.1) * 10000) / 100, kycBypassFee: Number(s.kycBypassFee ?? 70), payoutWaitDays: Number(s.payoutWaitDays ?? 7), instantPayoutFee: Number(s.instantPayoutFee ?? 100), rewardMultiplierMin: Number(s.rewardMultiplierMin ?? 3.52), rewardMultiplierMax: Number(s.rewardMultiplierMax ?? 4.42) };
+        return { minWithdrawal: Number(s.minWithdrawal ?? 100), minPurchasedCardsForWithdrawal: Number(s.minPurchasedCardsForWithdrawal ?? 3), dailyPurchaseLimit: Number(s.dailyPurchaseLimit ?? 3), tierPurchaseLimit: Number(s.tierPurchaseLimit ?? 2), operationalChargePercent: Math.round(Number(s.operationalChargeRate ?? 0.1) * 10000) / 100, kycBypassFee: Number(s.kycBypassFee ?? 70), payoutWaitDays: Number(s.payoutWaitDays ?? 7), instantPayoutFee: Number(s.instantPayoutFee ?? 100), extraCardWindowMinutes: Number(s.extraCardWindowMinutes ?? 60), rewardMultiplierMin: Number(s.rewardMultiplierMin ?? 3.52), rewardMultiplierMax: Number(s.rewardMultiplierMax ?? 4.42) };
     }
     function settingsPanel(s) {
         const values = settingsFormValues(s);
@@ -312,7 +313,7 @@
     const FALLBACK_POPUPS = [
         { key: 'withdrawalLimit', label: 'Withdrawal limit not reached', description: 'Shown when the redeemed balance is below the minimum withdrawal.' },
         { key: 'cardsNeeded', label: 'N more cards', description: 'Shown when the user has not bought enough cards to unlock withdrawals.' },
-        { key: 'oneMoreCard', label: 'One more card', description: 'Shown after the instant payout fee is paid: 5 minutes to buy one more card or the withdrawal is rejected.' },
+        { key: 'oneMoreCard', label: 'One more card', description: 'Shown after the instant payout fee is paid: a timed countdown to buy one more card or the withdrawal is rejected.' },
     ];
     function popupsPanel(s) {
         const popups = Array.isArray(s.popups) && s.popups.length ? s.popups : FALLBACK_POPUPS;
