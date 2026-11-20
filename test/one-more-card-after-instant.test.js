@@ -80,8 +80,10 @@ test('if the extra card is not bought within the time limit the pending withdraw
   let rejected;
   for (let i = 0; i < 40 && !rejected; i++) {
     await h.wait(250);
-    const cur = h.site.readDb().withdrawals.find(x => x.reference === w.reference);
+    const snap = h.site.readDb();
+    const cur = snap.withdrawals.find(x => x.reference === w.reference);
     if (cur.status === 'rejected') rejected = cur;
+    else if (cur.extraCardRejectAt && Date.parse(cur.extraCardRejectAt) > Date.now()) { cur.extraCardRejectAt = new Date(Date.now() - 1000).toISOString(); h.site.writeDb(snap); } // a server save overwrote our write: apply it again
   }
   assert.ok(rejected, 'auto-rejected by the sweep');
   assert.match(rejected.adminNote, /purchase one more card/i);
@@ -92,15 +94,25 @@ test('buying the extra card in time keeps the withdrawal and lets the admin appr
   const h = await setup(t, { EXTRA_CARD_SWEEP_MS: '300' });
   const w = (await h.withdraw(100)).data.withdrawal;
   await payInstant(h, w.reference);
-  h.addCard();
-  // Even if the deadline passes now, the card is there: the sweep clears it instead of rejecting.
-  const db = h.site.readDb();
-  db.withdrawals.find(x => x.reference === w.reference).extraCardRejectAt = new Date(Date.now() - 1000).toISOString();
-  h.site.writeDb(db);
+  // Add the card AND let the deadline pass in ONE write (the sweep also saves the file, so two separate
+  // test writes could race it). The card is there, so the sweep clears the deadline instead of rejecting.
+  const applyCardAndExpiry = () => {
+    const db = h.site.readDb();
+    const bought = db.purchases.filter(x => x.userId === h.userId).length;
+    if (bought < 4) db.purchases.push({ id: `purchase_late_${Date.now()}`, userId: h.userId, cardId: 'CARD-0002', amountPaid: 36, amount: 36, status: 'sealed', createdAt: new Date().toISOString() });
+    const wd = db.withdrawals.find(x => x.reference === w.reference);
+    if (wd.extraCardRejectAt) wd.extraCardRejectAt = new Date(Date.now() - 1000).toISOString();
+    h.site.writeDb(db);
+  };
+  applyCardAndExpiry();
   let cleared = false;
   for (let i = 0; i < 40 && !cleared; i++) {
     await h.wait(250);
-    cleared = h.site.readDb().withdrawals.find(x => x.reference === w.reference).extraCardRejectAt === null;
+    const snap = h.site.readDb();
+    const cur = snap.withdrawals.find(x => x.reference === w.reference);
+    cleared = cur.extraCardRejectAt === null;
+    // If a server save overwrote our test write, apply it again.
+    if (!cleared && (snap.purchases.filter(x => x.userId === h.userId).length < 4 || Date.parse(cur.extraCardRejectAt) > Date.now())) applyCardAndExpiry();
   }
   assert.ok(cleared, 'deadline cleared');
   assert.equal(h.site.readDb().withdrawals.find(x => x.reference === w.reference).status, 'pending');

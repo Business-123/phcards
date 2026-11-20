@@ -264,6 +264,14 @@ td small { display: block; margin-top: 4px; color: var(--faint); font-size: 9px;
 .hero-total:hover .hero-total-link { background: #f0b82e; }
 @media (max-width: 760px) { .hero-total { flex-wrap: wrap; gap: 14px; padding: 20px; } .hero-total-icon { width: 46px; height: 46px; border-radius: 13px; } .hero-total-value { font-size: 34px; } .hero-total-link { margin-left: 0; } }
 
+/* Two hero cards side by side: earned today + total earnings */
+.hero-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; }
+.hero-row .hero-total { margin-bottom: 0; }
+.hero-row .hero-total-value { font-size: 38px; }
+.hero-total-alt { cursor: default; background: linear-gradient(135deg, #1f2a22 0%, #1e1b18 60%, #2c3a2b 100%); border-color: #3b5139; }
+.hero-total-alt:hover { transform: none; box-shadow: 0 16px 36px rgba(68, 52, 30, .22); }
+@media (max-width: 980px) { .hero-row { grid-template-columns: 1fr; } }
+
 /* Overview histogram: paired bars per day (users + spent), each scaled to its own peak */
 .trend-hist { display: flex; align-items: stretch; gap: 6px; height: 215px; padding-top: 16px; }
 .hist-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }

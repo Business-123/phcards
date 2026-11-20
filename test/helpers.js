@@ -102,7 +102,8 @@ async function createSite(t, { env = {}, withHub = true } = {}) {
     method: 'POST', body: JSON.stringify({ name, phone, email, password: 'simple' }),
   });
   const readDb = () => JSON.parse(fs.readFileSync(dataFile, 'utf8'));
-  const writeDb = db => fs.writeFileSync(dataFile, JSON.stringify(db));
+  // Atomic (temp file + rename) like the server's own save(), so a background job reading the file never sees a half-written one.
+  const writeDb = db => { const tmp = `${dataFile}.test-${process.pid}-${Date.now()}`; fs.writeFileSync(tmp, JSON.stringify(db)); fs.renameSync(tmp, dataFile); };
 
   // Starts a card payment (what tapping BUY does).
   const startPurchase = (cookie, cardId, idempotencyKey) => request('/api/purchases', {

@@ -29,6 +29,11 @@
         .updated { margin-top: 18px; color: var(--faint); font-size: 10px; text-align: center; }
         .hero-total { margin-bottom: 14px; cursor: default; }
         .hero-total:hover { transform: none; }
+        .hero-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; }
+        .hero-row .hero-total { margin-bottom: 0; }
+        .hero-row .hero-total-value { font-size: 34px; }
+        .hero-total-alt { background: linear-gradient(135deg, #1f2a22 0%, #1e1b18 60%, #2c3a2b 100%); border-color: #3b5139; }
+        @media (max-width: 700px) { .hero-row { grid-template-columns: 1fr; } }
     </style>
 </head>
 <body>
@@ -76,10 +81,10 @@
             app.innerHTML = `
                 <p class="partner-brand"><span>✦</span>PHANTOM <b>CARDS</b></p>
                 <div class="partner-hello"><h1>Hi ${esc(d.promoter.name)}</h1><p>Your personal promoter dashboard. Figures update automatically.</p></div>
-                <section class="hero-total"><div class="hero-total-body"><span class="hero-total-label">Total your customers spent on cards</span><strong class="hero-total-value">${money(d.totalPurchased)}</strong><span class="hero-total-meta">${d.cardsPurchased.toLocaleString()} card${d.cardsPurchased === 1 ? '' : 's'} bought by ${d.buyers.toLocaleString()} customer${d.buyers === 1 ? '' : 's'}</span></div></section>
-                <div class="metric-grid">${metric('Link visits', d.clicks.toLocaleString(), 'People who opened your link')}${metric('Sign-ups', d.signups.toLocaleString(), 'Accounts created via your link')}${metric('Buyers', d.buyers.toLocaleString(), 'Sign-ups who bought a card')}${metric('Cards bought', d.cardsPurchased.toLocaleString(), 'Excludes free gifts')}</div>
+                <div class="hero-row"><section class="hero-total"><div class="hero-total-body"><span class="hero-total-label">Earned today</span><strong class="hero-total-value">${money(d.earnedToday)}</strong><span class="hero-total-meta">${d.cardsToday.toLocaleString()} card${d.cardsToday === 1 ? '' : 's'} bought today · resets at midnight (Ghana time)</span></div></section><section class="hero-total hero-total-alt"><div class="hero-total-body"><span class="hero-total-label">Total earnings</span><strong class="hero-total-value">${money(d.totalEarnings)}</strong><span class="hero-total-meta">${d.cardsPurchased.toLocaleString()} card${d.cardsPurchased === 1 ? '' : 's'} bought by ${d.buyers.toLocaleString()} customer${d.buyers === 1 ? '' : 's'} · excludes redeemed-balance payments</span></div></section></div>
+                <div class="metric-grid">${metric('Link visits', d.clicks.toLocaleString(), 'People who opened your link')}${metric('Sign-ups', d.signups.toLocaleString(), 'Accounts created via your link')}${metric('Buyers', d.buyers.toLocaleString(), 'Sign-ups who bought a card')}${metric('Cards bought', d.cardsPurchased.toLocaleString(), 'Excludes free gifts and balance payments')}</div>
                 <section class="panel mt-16"><div class="panel-heading"><h3>Your referral link</h3></div><p style="margin:0;color:var(--muted)">Share this link. Anyone who signs up after opening it is counted as yours.</p><div class="link-box"><code id="refLink">${esc(link)}</code><button class="primary-button" id="copyLink">Copy link</button></div></section>
-                <section class="panel mt-16"><div class="panel-heading"><h3>Card purchases · last 14 days</h3></div><div class="bars">${bars}</div><div class="bar-labels">${labels}</div></section>
+                <section class="panel mt-16"><div class="panel-heading"><h3>Earned per day · last 14 days</h3></div><div class="bars">${bars}</div><div class="bar-labels">${labels}</div></section>
                 <section class="panel table-panel mt-16"><div class="panel-heading" style="padding:18px 18px 0"><h3>Your customers</h3></div><div class="table-wrap"><table><thead><tr><th>Customer</th><th>Joined</th><th>Cards</th><th>Spent on cards</th></tr></thead><tbody>${rows}</tbody></table></div></section>
                 <p class="updated">Last updated ${new Date(d.generatedAt).toLocaleTimeString()}</p>`;
             document.getElementById('copyLink').onclick = async function () { try { await navigator.clipboard.writeText(link); this.textContent = 'Copied ✓'; } catch { this.textContent = 'Select & copy'; } setTimeout(() => { this.textContent = 'Copy link'; }, 1800); };

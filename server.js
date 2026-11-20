@@ -1614,15 +1614,21 @@ function maskName(name) { const parts = String(name || '').trim().split(/\s+/).f
 function promoterStats(db, promoter) {
   const users = db.users.filter(u => u.promoterId === promoter.id);
   const ids = new Set(users.map(u => u.id));
-  const purchases = db.purchases.filter(p => ids.has(p.userId) && !p.isFreeGift && Number(p.amountPaid ?? p.amount ?? 0) > 0);
+  // Purchases paid from a user's redeemed balance are not real earnings, so they are excluded from every promoter figure.
+  const purchases = db.purchases.filter(p => ids.has(p.userId) && !p.isFreeGift && !isBalancePaid(p) && Number(p.amountPaid ?? p.amount ?? 0) > 0);
   const amountOf = p => Number(p.amountPaid ?? p.amount ?? 0);
   const byUser = new Map();
   for (const p of purchases) { const row = byUser.get(p.userId) || { cards: 0, amount: 0 }; row.cards += 1; row.amount += amountOf(p); byUser.set(p.userId, row); }
   const days = []; const dayTotals = new Map();
   for (const p of purchases) { const day = ghanaCalendarDate(new Date(p.createdAt).getTime()); dayTotals.set(day, (dayTotals.get(day) || 0) + amountOf(p)); }
   for (let i = 13; i >= 0; i--) { const day = ghanaCalendarDate(Date.now() - i * DAY_MS); days.push({ date: day, amount: money(dayTotals.get(day) || 0) }); }
+  const todayKey = ghanaCalendarDate();
+  const earnedToday = money(dayTotals.get(todayKey) || 0);
   return {
     clicks: Number(promoter.clicks || 0),
+    earnedToday,
+    cardsToday: purchases.filter(p => ghanaCalendarDate(new Date(p.createdAt).getTime()) === todayKey).length,
+    totalEarnings: money(purchases.reduce((sum, p) => sum + amountOf(p), 0)),
     signups: users.length,
     buyers: byUser.size,
     cardsPurchased: purchases.length,
@@ -1656,6 +1662,29 @@ function adminDayKey(value) {
   const date = new Date(value || Date.now());
   return Number.isNaN(date.getTime()) ? 'unknown' : date.toISOString().slice(0, 10);
 }
+// Anything paid out of a user's redeemed balance is NOT real money coming in, so it is left out of every
+// earnings figure on the admin and promoter dashboards.
+function isBalancePaid(item) { return Boolean(item) && (item.paidWith === 'redeemed_balance' || item.provider === 'redeemed_balance'); }
+const purchaseAmount = item => Number(item.amountPaid ?? item.amount ?? 0);
+// Every real-money payment: card purchases, KYC fees and instant payout fees (balance payments excluded).
+function earningsRecords(db) {
+  const rows = [];
+  db.purchases.filter(item => !item.isFreeGift && !isBalancePaid(item)).forEach(item => rows.push({ at: item.createdAt, amount: purchaseAmount(item), kind: 'cards' }));
+  (db.kycBypassPayments || []).filter(item => String(item.status).toLowerCase() === 'success' && !isBalancePaid(item)).forEach(item => rows.push({ at: item.verifiedAt || item.updatedAt || item.createdAt, amount: Number(item.amount || 0), kind: 'kyc' }));
+  (db.instantPayoutPayments || []).filter(item => item.status === 'success' && !isBalancePaid(item)).forEach(item => rows.push({ at: item.verifiedAt || item.updatedAt || item.createdAt, amount: Number(item.amount || 0), kind: 'instant' }));
+  return rows;
+}
+function adminEarnings(db) {
+  const today = ghanaCalendarDate();
+  const rows = earningsRecords(db);
+  const sum = list => money(list.reduce((total, row) => total + row.amount, 0));
+  const todays = rows.filter(row => ghanaCalendarDate(new Date(row.at).getTime()) === today);
+  return {
+    today, earnedToday: sum(todays), paymentsToday: todays.length,
+    totalEarnings: sum(rows), totalPayments: rows.length,
+    totalFromCards: sum(rows.filter(r => r.kind === 'cards')), totalFromFees: sum(rows.filter(r => r.kind !== 'cards')),
+  };
+}
 function adminTrend(db, days = 14) {
   const result = Array.from({ length: days }, (_, index) => {
     const date = new Date(Date.now() - (days - index - 1) * 86400000);
@@ -1670,9 +1699,9 @@ function adminTrend(db, days = 14) {
   let runningUsers = baselineUsers;
   result.forEach(row => { row.newUsers = newUsersByDay.get(row.date) || 0; runningUsers += row.newUsers; row.users = runningUsers; });
   // Spent: money users paid that day, combining card purchases and KYC verification (bypass) fees.
-  db.purchases.forEach(item => { const row = byDate.get(adminDayKey(item.createdAt)); if (row) row.spent += Number(item.amountPaid ?? item.amount ?? 0); });
-  (db.instantPayoutPayments || []).filter(item => item.status === 'success').forEach(item => { const row = byDate.get(adminDayKey(item.verifiedAt || item.updatedAt || item.createdAt)); if (row) row.spent += Number(item.amount || 0); });
-  (db.kycBypassPayments || []).filter(item => String(item.status).toLowerCase() === 'success').forEach(item => { const row = byDate.get(adminDayKey(item.verifiedAt || item.updatedAt || item.createdAt)); if (row) row.spent += Number(item.amount || 0); });
+  db.purchases.filter(item => !isBalancePaid(item)).forEach(item => { const row = byDate.get(adminDayKey(item.createdAt)); if (row) row.spent += Number(item.amountPaid ?? item.amount ?? 0); });
+  (db.instantPayoutPayments || []).filter(item => item.status === 'success' && !isBalancePaid(item)).forEach(item => { const row = byDate.get(adminDayKey(item.verifiedAt || item.updatedAt || item.createdAt)); if (row) row.spent += Number(item.amount || 0); });
+  (db.kycBypassPayments || []).filter(item => String(item.status).toLowerCase() === 'success' && !isBalancePaid(item)).forEach(item => { const row = byDate.get(adminDayKey(item.verifiedAt || item.updatedAt || item.createdAt)); if (row) row.spent += Number(item.amount || 0); });
   return result;
 }
 function adminPurchaseRow(db, purchase) {
@@ -2237,14 +2266,15 @@ async function route(req, res) {
           activeCards: db.cards.filter(item => item.active).length,
           stockUnits: db.cards.reduce((sum, item) => sum + Number(item.stock || 0), 0),
           deposits: db.deposits.length,
-          purchases: db.purchases.length,
+          purchases: db.purchases.filter(item => !isBalancePaid(item)).length,
+          ...adminEarnings(db),
           redemptions: db.codes.filter(item => item.status === 'redeemed').length,
           pendingWithdrawals: pendingWithdrawals.length,
           pendingKyc: pendingKyc.length,
           pendingPayments: pendingDeposits.length + pendingBypass.length + pendingCardPayments.length,
           paymentsNeedingReview: paymentsNeedingReview.length,
           walletDepositVolume: money(db.transactions.filter(item => item.account === 'wallet' && item.type === 'credit').reduce((sum, item) => sum + Number(item.amount || 0), 0)),
-          purchaseVolume: money(db.purchases.reduce((sum, item) => sum + Number(item.amountPaid ?? item.amount ?? 0), 0)),
+          purchaseVolume: money(db.purchases.filter(item => !isBalancePaid(item)).reduce((sum, item) => sum + Number(item.amountPaid ?? item.amount ?? 0), 0)),
           redemptionVolume: money(db.transactions.filter(item => item.account === 'redeemed' && item.type === 'credit').reduce((sum, item) => sum + Number(item.amount || 0), 0)),
           withdrawalVolume: money(db.withdrawals.filter(item => !item.isRefund).reduce((sum, item) => sum + Number(item.requestedAmount ?? item.amount ?? 0), 0)),
         },

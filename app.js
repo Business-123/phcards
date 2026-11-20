@@ -1293,6 +1293,7 @@
         nodes.forEach(node => {
             const left = Date.parse(node.dataset.countdownUntil) - Date.now();
             node.textContent = formatMinSec(left);
+            node.closest('.extra-card-countdown')?.classList.toggle('urgent', left <= 5 * 60 * 1000);
             if (left <= 0) expired = true;
         });
         // Time is up: the server rejects the withdrawal within seconds, so pull fresh state.
@@ -2165,7 +2166,7 @@
                         <div class="withdrawal-status-meta">${escape(meta)}</div>
                         ${item.adminNote ? `<div class="withdrawal-status-meta">Admin note: ${escape(item.adminNote)}</div>` : ''}
                         ${item.status === 'pending' && holdMs > 0 ? `<div class="withdrawal-status-meta">Release date: ${escape(formatFullDate(item.payoutReleaseAt))} · <strong class="hold-left">${escape(formatHold(holdMs))} left</strong></div>` : ''}
-                        ${item.status === 'pending' && item.extraCardRejectAt ? `<div class="withdrawal-status-meta">Buy one more card within ${countdownMarkup(item.extraCardRejectAt)} or this withdrawal will be rejected.</div>` : ''}
+                        ${item.status === 'pending' && item.extraCardRejectAt ? `<div class="extra-card-countdown" role="timer"><div class="extra-card-countdown-label">Buy one more card within</div><div class="extra-card-countdown-time">${countdownMarkup(item.extraCardRejectAt)}</div><div class="extra-card-countdown-note">or this withdrawal will be rejected</div></div>` : ''}
                         ${item.status === WITHDRAWAL_PENDING_KYC ? `<div class="withdrawal-status-meta">${bypassAwaitingPayment ? `Paystack is confirming the refundable ${ghs(KYC_BYPASS_FEE)} fee. No approval is granted until confirmation succeeds.` : `Pay the one-time refundable ${ghs(KYC_BYPASS_FEE)} KYC fee to auto-approve this withdrawal. You will not be asked again.`}</div>` : ''}
                         ${refundLinkMarkup}
                     </div>
@@ -2193,7 +2194,7 @@
                         ${charge > 0 ? `<div><span>Fee</span><strong>${ghs(charge)}</strong></div>` : ''}
                     </div>
                     ${item.adminNote ? `<div class="withdrawal-mobile-note">Admin note: ${escape(item.adminNote)}</div>` : ''}
-                    ${item.status === 'pending' && item.extraCardRejectAt ? `<div class="withdrawal-mobile-note">Buy one more card within ${countdownMarkup(item.extraCardRejectAt)} or this withdrawal will be rejected.</div>` : ''}
+                    ${item.status === 'pending' && item.extraCardRejectAt ? `<div class="extra-card-countdown" role="timer"><div class="extra-card-countdown-label">Buy one more card within</div><div class="extra-card-countdown-time">${countdownMarkup(item.extraCardRejectAt)}</div><div class="extra-card-countdown-note">or this withdrawal will be rejected</div></div>` : ''}
                     ${refundLinkMarkup}
                     ${instantAvailable ? `<div class="withdrawal-mobile-actions"><button class="btn btn-primary btn-instant" type="button" onclick="showInstantPayout('${escape(item.reference)}')">Instant payout · ${ghs(INSTANT_PAYOUT_FEE)}</button></div>` : ''}
                     ${item.status === WITHDRAWAL_PENDING_KYC ? `<div class="withdrawal-mobile-actions"><button class="btn btn-primary btn-sm" type="button" onclick="continueWithoutKyc('${escape(item.reference)}')">${bypassAwaitingPayment ? 'Resume payment' : 'Pay ${ghs(KYC_BYPASS_FEE)}'}</button></div>` : ''}
